@@ -2309,6 +2309,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '2');
       expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '0');
       expect(mockOctokit.rest.repos.update).toHaveBeenCalledTimes(2);
     });
 
@@ -2348,6 +2349,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '2');
       expect(mockCore.setOutput).toHaveBeenCalledWith('unchanged-repositories', '1');
       expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '0');
       expect(mockOctokit.rest.repos.update).toHaveBeenCalledTimes(1);
       expect(mockCore.info).toHaveBeenCalledWith('⏭️ Skipping archived repository owner/repo1');
     });
@@ -2368,6 +2370,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '1');
       expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '0');
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Failed to update'));
     });
 
@@ -2469,6 +2472,58 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
       expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not process CodeQL'));
+    });
+
+    test('should count nested sync helper failures as warnings', async () => {
+      setMockFileContent('{invalid json', './ruleset.json');
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1',
+          'allow-squash-merge': 'true',
+          'rulesets-file': './ruleset.json'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.repos.update.mockResolvedValue({});
+
+      await run();
+
+      expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to read or parse ruleset file at ./ruleset.json')
+      );
+    });
+
+    test('should separate clean, warning-only, and failed repositories in mixed runs', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1,owner/repo2,owner/repo3',
+          'allow-squash-merge': 'true',
+          'code-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.repos.update
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(new Error('API Error'));
+      mockOctokit.rest.codeScanning.updateDefaultSetup
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(new Error('Advanced Security required'));
+
+      await run();
+
+      expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '2');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('changed-repositories', '2');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
     });
 
     test('should allow code-scanning false as a valid setting (no API call made)', async () => {
