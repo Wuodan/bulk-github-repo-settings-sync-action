@@ -823,6 +823,7 @@ export async function updateRepositorySettings(
       settings: updateParams,
       currentSettings,
       changes,
+      processingErrors: [],
       dryRun
     };
 
@@ -919,6 +920,7 @@ export async function updateRepositorySettings(
       } catch (error) {
         // CodeQL setup might fail for various reasons (not supported language, already enabled, etc.)
         result.codeScanningWarning = `Could not process CodeQL: ${error.message}`;
+        result.processingErrors.push(result.codeScanningWarning);
       }
     }
 
@@ -1021,6 +1023,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.secretScanningWarning = `Could not process secret scanning: ${error.message}`;
+          result.processingErrors.push(result.secretScanningWarning);
         }
       }
 
@@ -1057,6 +1060,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.secretScanningPushProtectionWarning = `Could not process secret scanning push protection: ${error.message}`;
+          result.processingErrors.push(result.secretScanningPushProtectionWarning);
         }
       }
 
@@ -1187,6 +1191,11 @@ export async function updateRepositorySettings(
         }
       }
     } // End of if (securitySettings)
+
+    if (result.processingErrors.length > 0) {
+      result.success = false;
+      result.error = result.processingErrors.join('; ');
+    }
 
     return result;
   } catch (error) {
