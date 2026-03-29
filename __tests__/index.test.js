@@ -2292,6 +2292,23 @@ describe('Bulk GitHub Repository Settings Action', () => {
   });
 
   describe('Action execution', () => {
+    const makeReadableRepoData = (overrides = {}) => ({
+      archived: false,
+      permissions: { admin: true, push: true, pull: true },
+      allow_squash_merge: false,
+      allow_merge_commit: true,
+      allow_rebase_merge: true,
+      delete_branch_on_merge: false,
+      allow_auto_merge: false,
+      allow_update_branch: false,
+      ...overrides
+    });
+
+    const getResultsOutput = () => {
+      const resultsCall = mockCore.setOutput.mock.calls.find(([name]) => name === 'results');
+      return JSON.parse(resultsCall[1]);
+    };
+
     test('should process repositories successfully', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -2639,6 +2656,231 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(results[1].hasWarnings).toBe(true);
       expect(results[1].codeScanningWarning).toContain('Could not process CodeQL');
     });
+
+    for (const warningCase of [
+      {
+        name: 'topics',
+        inputs: {
+          topics: 'topic1,topic2'
+        },
+        setupMocks: () => {
+          mockOctokit.rest.repos.getAllTopics.mockRejectedValue(new Error('Topics unavailable'));
+        },
+        warningText: 'Could not process topics'
+      },
+      {
+        name: 'immutable releases',
+        inputs: {
+          'immutable-releases': 'true'
+        },
+        setupMocks: () => {
+          mockOctokit.request.mockRejectedValue(new Error('Immutable releases unavailable'));
+        },
+        warningText: 'Could not process immutable releases'
+      },
+      {
+        name: 'secret scanning',
+        inputs: {
+          'secret-scanning': 'true'
+        },
+        setupMocks: () => {
+          mockOctokit.rest.repos.update.mockRejectedValue(new Error('Secret scanning not available'));
+        },
+        warningText: 'Could not process secret scanning'
+      },
+      {
+        name: 'secret scanning push protection',
+        inputs: {
+          'secret-scanning-push-protection': 'true'
+        },
+        setupMocks: () => {
+          mockOctokit.rest.repos.update.mockRejectedValue(new Error('Push protection not available'));
+        },
+        warningText: 'Could not process secret scanning push protection'
+      },
+      {
+        name: 'Dependabot alerts',
+        inputs: {
+          'dependabot-alerts': 'true'
+        },
+        setupMocks: () => {
+          mockOctokit.request.mockRejectedValue(new Error('Dependabot alerts unavailable'));
+        },
+        warningText: 'Could not process Dependabot alerts'
+      },
+      {
+        name: 'Dependabot security updates',
+        inputs: {
+          'dependabot-security-updates': 'true'
+        },
+        setupMocks: () => {
+          mockOctokit.request.mockRejectedValue(new Error('Dependabot security updates unavailable'));
+        },
+        warningText: 'Could not process Dependabot security updates'
+      }
+    ]) {
+      test(`should mark hasWarnings for ${warningCase.name} warnings`, async () => {
+        mockCore.getInput.mockImplementation(name => {
+          const inputs = {
+            'github-token': 'test-token',
+            repositories: 'owner/repo1',
+            ...warningCase.inputs
+          };
+          return inputs[name] || '';
+        });
+
+        mockOctokit.rest.repos.get.mockResolvedValue({ data: makeReadableRepoData() });
+        mockOctokit.rest.repos.update.mockResolvedValue({});
+        mockOctokit.rest.repos.getAllTopics.mockResolvedValue({ data: { names: [] } });
+        mockOctokit.rest.codeScanning.updateDefaultSetup.mockResolvedValue({});
+        mockOctokit.request.mockResolvedValue({});
+        warningCase.setupMocks();
+
+        await run();
+
+        expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '1');
+        expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+        expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
+        expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining(warningCase.warningText));
+
+        const results = getResultsOutput();
+        expect(results[0].hasWarnings).toBe(true);
+      });
+    }
+
+    for (const warningCase of [
+      {
+        name: 'dependabot.yml sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'dependabot-yml': './dependabot.yml'
+        },
+        setupMocks: () => {
+          setMockFileContent('version: 2\nupdates: []', './dependabot.yml');
+          mockOctokit.rest.repos.get
+            .mockResolvedValueOnce({ data: makeReadableRepoData() })
+            .mockRejectedValueOnce(new Error('Repo fetch failed'));
+        },
+        warningText: 'Failed to sync dependabot.yml: Repo fetch failed'
+      },
+      {
+        name: '.gitignore sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          gitignore: './source.gitignore'
+        },
+        setupMocks: () => {
+          setMockFileContent('node_modules/\n', './source.gitignore');
+          mockOctokit.rest.repos.get
+            .mockResolvedValueOnce({ data: makeReadableRepoData() })
+            .mockRejectedValueOnce(new Error('Repo fetch failed'));
+        },
+        warningText: 'Failed to sync .gitignore: Repo fetch failed'
+      },
+      {
+        name: 'pull request template sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'pull-request-template': './pull_request_template.md'
+        },
+        setupMocks: () => {
+          setMockFileContent('## Description', './pull_request_template.md');
+          mockOctokit.rest.repos.get
+            .mockResolvedValueOnce({ data: makeReadableRepoData() })
+            .mockRejectedValueOnce(new Error('Repo fetch failed'));
+        },
+        warningText: 'Failed to sync pull request template: Repo fetch failed'
+      },
+      {
+        name: 'workflow files sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'workflow-files': './ci.yml'
+        },
+        setupMocks: () => {
+          setMockFileContent('name: CI\non: push', './ci.yml');
+          mockOctokit.rest.repos.get
+            .mockResolvedValueOnce({ data: makeReadableRepoData() })
+            .mockRejectedValueOnce(new Error('Repo fetch failed'));
+        },
+        warningText: 'Failed to sync workflow files: Repo fetch failed'
+      },
+      {
+        name: 'autolinks sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'autolinks-file': './autolinks.json'
+        },
+        setupMocks: () => {
+          setMockFileContent('{invalid json', './autolinks.json');
+        },
+        warningText: 'Failed to read or parse autolinks file at ./autolinks.json'
+      },
+      {
+        name: 'copilot instructions sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'copilot-instructions-md': './copilot-instructions.md'
+        },
+        setupMocks: () => {
+          setMockFileContent('# Instructions', './copilot-instructions.md');
+          mockOctokit.rest.repos.get
+            .mockResolvedValueOnce({ data: makeReadableRepoData() })
+            .mockRejectedValueOnce(new Error('Repo fetch failed'));
+        },
+        warningText: 'Failed to sync copilot-instructions.md: Repo fetch failed'
+      },
+      {
+        name: 'CODEOWNERS sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          codeowners: './CODEOWNERS',
+          'codeowners-target-path': 'invalid/path'
+        },
+        setupMocks: () => {},
+        warningText: 'Invalid CODEOWNERS target path: invalid/path'
+      },
+      {
+        name: 'package.json sync',
+        inputs: {
+          'allow-squash-merge': 'true',
+          'package-json-file': './package-source.json',
+          'package-json-sync-scripts': 'true'
+        },
+        setupMocks: () => {
+          setMockFileContent('{invalid json', './package-source.json');
+        },
+        warningText: 'Failed to read or parse package.json file at ./package-source.json'
+      }
+    ]) {
+      test(`should mark hasWarnings for ${warningCase.name} warnings`, async () => {
+        mockCore.getInput.mockImplementation(name => {
+          const inputs = {
+            'github-token': 'test-token',
+            repositories: 'owner/repo1',
+            ...warningCase.inputs
+          };
+          return inputs[name] || '';
+        });
+
+        mockOctokit.rest.repos.get.mockResolvedValue({ data: makeReadableRepoData() });
+        mockOctokit.rest.repos.update.mockResolvedValue({});
+        mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
+        mockOctokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
+        mockOctokit.request.mockResolvedValue({});
+        warningCase.setupMocks();
+
+        await run();
+
+        expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '1');
+        expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+        expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
+        expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining(warningCase.warningText));
+
+        const results = getResultsOutput();
+        expect(results[0].hasWarnings).toBe(true);
+      });
+    }
 
     test('should allow code-scanning false as a valid setting (no API call made)', async () => {
       mockCore.getInput.mockImplementation(name => {
