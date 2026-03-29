@@ -2526,6 +2526,120 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
     });
 
+    test('should count a repository with multiple warnings only once', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1',
+          'allow-squash-merge': 'true',
+          'code-scanning': 'true',
+          'secret-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.repos.update.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('Secret scanning not available'));
+      mockOctokit.rest.codeScanning.updateDefaultSetup.mockRejectedValue(new Error('Advanced Security required'));
+
+      await run();
+
+      expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('changed-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not process CodeQL'));
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not process secret scanning'));
+    });
+
+    test('should count multiple warning-only repositories', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1,owner/repo2',
+          'code-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.codeScanning.updateDefaultSetup
+        .mockRejectedValueOnce(new Error('Advanced Security required'))
+        .mockRejectedValueOnce(new Error('Advanced Security required'));
+
+      await run();
+
+      expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '2');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('changed-repositories', '2');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '2');
+    });
+
+    test('should handle archived and warning-only repositories in the same run', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1,owner/repo2',
+          'code-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.repos.get
+        .mockResolvedValueOnce({
+          data: {
+            archived: true,
+            permissions: { admin: true, push: true, pull: true }
+          }
+        })
+        .mockResolvedValueOnce({
+          data: {
+            archived: false,
+            permissions: { admin: true, push: true, pull: true },
+            allow_squash_merge: false,
+            allow_merge_commit: true,
+            allow_rebase_merge: true,
+            delete_branch_on_merge: false,
+            allow_auto_merge: false,
+            allow_update_branch: false
+          }
+        });
+      mockOctokit.rest.codeScanning.updateDefaultSetup.mockRejectedValueOnce(new Error('Advanced Security required'));
+
+      await run();
+
+      expect(mockCore.setOutput).toHaveBeenCalledWith('updated-repositories', '2');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('changed-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('unchanged-repositories', '1');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('failed-repositories', '0');
+      expect(mockCore.setOutput).toHaveBeenCalledWith('warning-repositories', '1');
+    });
+
+    test('should include hasWarnings in results output for warning-only and clean repositories', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1,owner/repo2',
+          'code-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.codeScanning.updateDefaultSetup
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(new Error('Advanced Security required'));
+
+      await run();
+
+      const resultsCall = mockCore.setOutput.mock.calls.find(([name]) => name === 'results');
+      const results = JSON.parse(resultsCall[1]);
+
+      expect(results).toHaveLength(2);
+      expect(results[0].repository).toBe('owner/repo1');
+      expect(results[0].hasWarnings).toBe(false);
+      expect(results[1].repository).toBe('owner/repo2');
+      expect(results[1].hasWarnings).toBe(true);
+      expect(results[1].codeScanningWarning).toContain('Could not process CodeQL');
+    });
+
     test('should allow code-scanning false as a valid setting (no API call made)', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
