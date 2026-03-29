@@ -2555,7 +2555,9 @@ describe('Bulk GitHub Repository Settings Action', () => {
         return inputs[name] || '';
       });
 
-      mockOctokit.rest.repos.update.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('Secret scanning not available'));
+      mockOctokit.rest.repos.update
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(new Error('Secret scanning not available'));
       mockOctokit.rest.codeScanning.updateDefaultSetup.mockRejectedValue(new Error('Advanced Security required'));
 
       await run();
