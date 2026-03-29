@@ -3394,6 +3394,7 @@ export async function run() {
     let successCount = 0;
     let failureCount = 0;
     let changedCount = 0;
+    let warningCount = 0;
 
     for (const repoConfig of repoList) {
       const repo = repoConfig.repo;
@@ -3780,6 +3781,9 @@ export async function run() {
 
       if (result.success) {
         successCount++;
+        if (result.hasWarnings) {
+          warningCount++;
+        }
         const repoHasChanges = hasRepositoryChanges(result);
         if (repoHasChanges) {
           changedCount++;
@@ -3957,7 +3961,6 @@ export async function run() {
     }
 
     // Set outputs
-    const warningCount = results.filter(result => result.hasWarnings).length;
     const unchangedCount = successCount - changedCount;
     core.setOutput('updated-repositories', successCount.toString());
     core.setOutput('changed-repositories', changedCount.toString());
