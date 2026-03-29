@@ -1194,8 +1194,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       const result = await updateRepositorySettings(mockOctokit, 'owner/repo', settings, true, null, null, null, false);
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Could not process CodeQL');
+      expect(result.success).toBe(true);
       expect(result.codeScanningWarning).toContain('Could not process CodeQL');
       expect(result.codeScanningWarning).toContain('Language not supported');
     });
@@ -1617,8 +1616,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
         false
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Could not process secret scanning');
+      expect(result.success).toBe(true);
       expect(result.secretScanningWarning).toContain('Could not process secret scanning');
     });
 
@@ -1749,45 +1747,6 @@ describe('Bulk GitHub Repository Settings Action', () => {
           }
         })
       );
-    });
-
-    test('should fail the repository when secret scanning push protection update fails', async () => {
-      mockOctokit.rest.repos.get.mockResolvedValue({
-        data: {
-          allow_squash_merge: false,
-          permissions: { admin: true, push: true, pull: true },
-          security_and_analysis: {
-            secret_scanning: { status: 'enabled' },
-            secret_scanning_push_protection: { status: 'disabled' }
-          }
-        }
-      });
-      mockOctokit.rest.repos.update
-        .mockResolvedValueOnce({})
-        .mockRejectedValueOnce(new Error('Push protection not available'));
-
-      const settings = { allow_squash_merge: true };
-      const securitySettings = {
-        secretScanning: null,
-        secretScanningPushProtection: true,
-        dependabotAlerts: null,
-        dependabotSecurityUpdates: null
-      };
-
-      const result = await updateRepositorySettings(
-        mockOctokit,
-        'owner/repo',
-        settings,
-        false,
-        null,
-        null,
-        securitySettings,
-        false
-      );
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Could not process secret scanning push protection');
-      expect(result.secretScanningPushProtectionWarning).toContain('Push protection not available');
     });
 
     test('should enable Dependabot alerts when requested', async () => {
