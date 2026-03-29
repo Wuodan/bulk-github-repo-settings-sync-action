@@ -3130,6 +3130,46 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(repoRow[2]).toContain('CodeQL');
     });
 
+    test('should show Warning status in summary table', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          'github-token': 'test-token',
+          repositories: 'owner/repo1',
+          'code-scanning': 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.repos.get.mockResolvedValue({
+        data: {
+          default_branch: 'main',
+          permissions: { admin: true },
+          allow_squash_merge: true,
+          allow_merge_commit: true,
+          allow_rebase_merge: true,
+          delete_branch_on_merge: false,
+          allow_auto_merge: false,
+          allow_update_branch: false
+        }
+      });
+      mockOctokit.rest.codeScanning.getDefaultSetup.mockResolvedValue({
+        data: { state: 'not-configured' }
+      });
+      mockOctokit.rest.codeScanning.updateDefaultSetup.mockRejectedValue(
+        new Error('Advanced Security must be enabled')
+      );
+
+      await run();
+
+      expect(mockCore.summary.addTable).toHaveBeenCalled();
+      const tableCall = mockCore.summary.addTable.mock.calls[0][0];
+      const repoRow = tableCall.find(row => row[0] === 'owner/repo1');
+
+      expect(repoRow).toBeDefined();
+      expect(repoRow[1]).toBe('\u26A0\uFE0F Warning');
+      expect(repoRow[2]).toContain('CodeQL scanning');
+    });
+
     test('should include immutable releases changes in summary table', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {

@@ -3981,19 +3981,25 @@ export async function run() {
           return [r.repository, '❌ Failed', r.error];
         }
 
+        const hasChanges = hasRepositoryChanges(r);
+        let status;
+        let details;
+
         if (r.archived) {
-          return [r.repository, '⏭️ Skipped', 'Repository is archived'];
+          status = '⏭️ Skipped';
+        } else if (r.hasWarnings) {
+          status = '⚠️ Warning';
+        } else if (hasChanges) {
+          status = '✅ Changed';
+        } else {
+          status = '➖ No changes';
         }
 
-        // Determine what actually happened
-        const hasChanges = hasRepositoryChanges(r);
-
-        let details;
-        if (hasChanges) {
-          // Get specific list of changes
+        if (r.archived) {
+          details = 'Repository is archived';
+        } else if (hasChanges) {
           const changesList = getChangesList(r, dryRun);
           if (changesList.length > 0) {
-            // Format as bullet points for readability
             details = changesList.join('; ');
           } else {
             details = dryRun ? 'Would update' : 'Updated';
@@ -4002,7 +4008,7 @@ export async function run() {
           details = 'No changes needed';
         }
 
-        return [r.repository, hasChanges ? '✅ Changed' : '➖ No changes', details];
+        return [r.repository, status, details];
       })
     ];
 
