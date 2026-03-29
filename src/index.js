@@ -694,6 +694,7 @@ export async function updateRepositorySettings(
       return {
         repository: repo,
         success: true,
+        hasWarnings: false,
         archived: true,
         changes: [],
         dryRun
@@ -820,6 +821,7 @@ export async function updateRepositorySettings(
     const result = {
       repository: repo,
       success: true,
+      hasWarnings: false,
       settings: updateParams,
       currentSettings,
       changes,
@@ -875,6 +877,7 @@ export async function updateRepositorySettings(
         result.topics = topics;
       } catch (error) {
         result.topicsWarning = `Could not process topics: ${error.message}`;
+        result.hasWarnings = true;
       }
     }
 
@@ -919,6 +922,7 @@ export async function updateRepositorySettings(
       } catch (error) {
         // CodeQL setup might fail for various reasons (not supported language, already enabled, etc.)
         result.codeScanningWarning = `Could not process CodeQL: ${error.message}`;
+        result.hasWarnings = true;
       }
     }
 
@@ -984,6 +988,7 @@ export async function updateRepositorySettings(
       } catch (error) {
         // Immutable releases might fail for various reasons (insufficient permissions, not available, etc.)
         result.immutableReleasesWarning = `Could not process immutable releases: ${error.message}`;
+        result.hasWarnings = true;
       }
     }
 
@@ -1021,6 +1026,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.secretScanningWarning = `Could not process secret scanning: ${error.message}`;
+          result.hasWarnings = true;
         }
       }
 
@@ -1057,6 +1063,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.secretScanningPushProtectionWarning = `Could not process secret scanning push protection: ${error.message}`;
+          result.hasWarnings = true;
         }
       }
 
@@ -1121,6 +1128,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.dependabotAlertsWarning = `Could not process Dependabot alerts: ${error.message}`;
+          result.hasWarnings = true;
         }
       }
 
@@ -1184,6 +1192,7 @@ export async function updateRepositorySettings(
           }
         } catch (error) {
           result.dependabotSecurityUpdatesWarning = `Could not process Dependabot security updates: ${error.message}`;
+          result.hasWarnings = true;
         }
       }
     } // End of if (securitySettings)
@@ -3569,6 +3578,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${dependabotResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${dependabotResult.error}`);
         }
       }
@@ -3587,6 +3597,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${gitignoreResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${gitignoreResult.error}`);
         }
       }
@@ -3608,6 +3619,7 @@ export async function run() {
         if (rulesetResult.success) {
           core.info(`  📋 ${rulesetResult.message}`);
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${rulesetResult.error}`);
         }
       }
@@ -3632,6 +3644,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${templateResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${templateResult.error}`);
         }
       }
@@ -3650,6 +3663,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${workflowResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${workflowResult.error}`);
         }
       }
@@ -3665,6 +3679,7 @@ export async function run() {
         if (autolinksResult.success) {
           core.info(`  🔗 ${autolinksResult.message}`);
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${autolinksResult.error}`);
         }
       }
@@ -3689,6 +3704,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${copilotResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${copilotResult.error}`);
         }
       }
@@ -3719,6 +3735,7 @@ export async function run() {
             core.info(`  🔗 PR URL: ${codeownersResult.prUrl}`);
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${codeownersResult.error}`);
         }
       }
@@ -3756,6 +3773,7 @@ export async function run() {
             }
           }
         } else {
+          result.hasWarnings = true;
           core.warning(`  ⚠️  ${packageJsonResult.error}`);
         }
       }
@@ -3939,11 +3957,13 @@ export async function run() {
     }
 
     // Set outputs
+    const warningCount = results.filter(result => result.hasWarnings).length;
     const unchangedCount = successCount - changedCount;
     core.setOutput('updated-repositories', successCount.toString());
     core.setOutput('changed-repositories', changedCount.toString());
     core.setOutput('unchanged-repositories', unchangedCount.toString());
     core.setOutput('failed-repositories', failureCount.toString());
+    core.setOutput('warning-repositories', warningCount.toString());
     core.setOutput('results', JSON.stringify(results));
 
     // Create summary
@@ -3998,6 +4018,7 @@ export async function run() {
         .addRaw(`\n**Total Repositories:** ${repoList.length}`)
         .addRaw(`\n**Changed:** ${changedCount}`)
         .addRaw(`\n**Unchanged:** ${unchangedCount}`)
+        .addRaw(`\n**Warnings:** ${warningCount}`)
         .addRaw(`\n**Failed:** ${failureCount}\n\n`)
         .addTable(summaryTable)
         .write();
@@ -4010,6 +4031,7 @@ export async function run() {
       core.info(`Total Repositories: ${repoList.length}`);
       core.info(`Changed: ${changedCount}`);
       core.info(`Unchanged: ${unchangedCount}`);
+      core.info(`Warnings: ${warningCount}`);
       core.info(`Failed: ${failureCount}`);
       for (const result of results) {
         if (!result.success) {
