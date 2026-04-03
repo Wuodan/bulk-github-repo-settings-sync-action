@@ -1,0 +1,11 @@
+repos:
+  - repo: bulk-repo-settings-sync-action-test/it-settings-a
+    allow-squash-merge: true
+    allow-auto-merge: true
+    delete-branch-on-merge: true
+
+  - repo: bulk-repo-settings-sync-action-test/it-topics-a
+    topics: integration-live,topics-check
+
+  - repo: bulk-repo-settings-sync-action-test/it-codeowners-a
+    codeowners: ./sample-configuration/integration-test/CODEOWNERS

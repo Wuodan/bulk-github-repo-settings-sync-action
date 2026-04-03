@@ -36,3 +36,33 @@ Follow the existing ESLint configuration and Prettier formatting. The project us
 ## Pull Requests
 
 Please ensure all tests pass and code is properly formatted before submitting a pull request.
+
+## Live Integration Testing
+
+This repository includes maintainer-facing live integration workflows for validating the action against real GitHub repositories in the dedicated org `bulk-repo-settings-sync-action-test`.
+
+Requirements:
+
+- A fine-grained PAT stored in this repository as `TEST_GH_TOKEN`
+- Access limited to the live test repositories used by the harness
+
+Current fixed repositories:
+
+- `bulk-repo-settings-sync-action-test/it-settings-a`
+- `bulk-repo-settings-sync-action-test/it-topics-a`
+- `bulk-repo-settings-sync-action-test/it-codeowners-a`
+
+Available workflows:
+
+- `Reset Live Test Repositories`
+  - Resets the fixed test repositories to their baseline state
+  - Useful when you want to inspect the repos before running the full integration test
+- `Live Integration`
+  - Runs the action against the fixed test repositories and validates action outputs plus resulting GitHub API state
+  - Supports a `skip-reset` boolean input so you can reuse the current repo state after a manual reset
+
+Suggested manual flow:
+
+1. Run `Reset Live Test Repositories`
+2. Inspect the repositories in GitHub if desired
+3. Run `Live Integration` with `skip-reset: true`
