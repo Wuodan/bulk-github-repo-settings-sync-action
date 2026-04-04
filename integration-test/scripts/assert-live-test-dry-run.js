@@ -75,6 +75,10 @@ async function main() {
         );
         assert(result.success === true, `${repoFullName} result should be successful`);
         assert(result.hasWarnings === false, `${repoFullName} should not have warnings`);
+        assert(
+          result.subResults?.some(subResult => subResult.kind === 'settings' && subResult.status === 'changed'),
+          `${repoFullName} should include a changed settings sub-result in dry-run mode`
+        );
       } else if (repoFullName.endsWith('/it-pr-dry-run-update-a')) {
         const branchContent = await getFileContent(
           octokit,

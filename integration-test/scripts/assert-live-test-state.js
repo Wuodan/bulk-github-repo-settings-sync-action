@@ -115,6 +115,10 @@ async function assertSettingsRepo(octokit, repoFullName, result) {
 
   assert(result.success === true, `${repoFullName} result should be successful`);
   assert(result.hasWarnings === false, `${repoFullName} should not have warnings`);
+  assert(
+    result.subResults?.some(subResult => subResult.kind === 'settings' && subResult.status === 'changed'),
+    `${repoFullName} should include a changed settings sub-result`
+  );
 }
 
 function assertChangedSetting(result, repoFullName, settingName) {
@@ -534,6 +538,10 @@ async function assertTopicsRepo(octokit, repoFullName, result) {
 
   assert(result.success === true, `${repoFullName} result should be successful`);
   assert(result.hasWarnings === false, `${repoFullName} should not have warnings`);
+  assert(
+    result.subResults?.some(subResult => subResult.kind === 'topics' && subResult.status === 'changed'),
+    `${repoFullName} should include a changed topics sub-result`
+  );
 }
 
 async function assertCodeownersRepo(octokit, repoFullName, result) {
@@ -547,6 +555,10 @@ async function assertCodeownersRepo(octokit, repoFullName, result) {
 
   assert(result.success === true, `${repoFullName} result should be successful`);
   assert(result.hasWarnings === false, `${repoFullName} should not have warnings`);
+  assert(
+    result.subResults?.some(subResult => subResult.kind === 'codeowners-sync' && subResult.status === 'changed'),
+    `${repoFullName} should include a changed CODEOWNERS sub-result`
+  );
 }
 
 async function assertWarningRepo(octokit, repoFullName, result) {
@@ -556,6 +568,10 @@ async function assertWarningRepo(octokit, repoFullName, result) {
   assert(result.success === true, `${repoFullName} result should be successful`);
   assert(result.hasWarnings === true, `${repoFullName} should have warnings`);
   assert(result.codeownersSyncWarning, `${repoFullName} should expose a CODEOWNERS warning`);
+  assert(
+    result.subResults?.some(subResult => subResult.kind === 'codeowners-sync' && subResult.status === 'warning'),
+    `${repoFullName} should include a warning CODEOWNERS sub-result`
+  );
 }
 
 async function assertUnchangedRepo(octokit, repoFullName, result) {
@@ -569,6 +585,7 @@ async function assertUnchangedRepo(octokit, repoFullName, result) {
 
   assert(result.success === true, `${repoFullName} result should be successful`);
   assert(result.hasWarnings === false, `${repoFullName} should not have warnings`);
+  assert((result.subResults?.length ?? 0) === 0, `${repoFullName} should not report any sub-results`);
 }
 
 async function main() {
