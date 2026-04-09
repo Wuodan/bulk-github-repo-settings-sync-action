@@ -920,31 +920,6 @@ describe('Bulk GitHub Repository Settings Action', () => {
       ]);
     });
 
-    test('should filter explicit repos selector by fork status', async () => {
-      mockOctokit.rest.repos.get
-        .mockResolvedValueOnce({ data: { fork: true } })
-        .mockResolvedValueOnce({ data: { fork: false } });
-
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              repos: ['my-org/repo1', 'my-org/repo2'],
-              fork: true
-            },
-            settings: {
-              'dependabot-alerts': false
-            }
-          }
-        ]
-      };
-
-      const result = await parseConfigWithRules(config, mockOctokit);
-
-      expect(result).toEqual([{ repo: 'my-org/repo1', 'dependabot-alerts': false }]);
-    });
-
     test('should throw error for invalid repos selector entries', async () => {
       const configWithNumber = {
         owner: 'my-org',
@@ -1032,80 +1007,6 @@ describe('Bulk GitHub Repository Settings Action', () => {
           'immutable-releases': true
         }
       ]);
-    });
-
-    test('should filter all selector by fork status without extra repo lookups', async () => {
-      mockOctokit.rest.orgs.get.mockResolvedValue({ data: { login: 'my-org' } });
-      mockOctokit.rest.repos.listForOrg.mockResolvedValueOnce({
-        data: [
-          { full_name: 'my-org/repo1', fork: true },
-          { full_name: 'my-org/repo2', fork: false }
-        ]
-      });
-
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              all: true,
-              fork: false
-            },
-            settings: {
-              'secret-scanning': true
-            }
-          }
-        ]
-      };
-
-      const result = await parseConfigWithRules(config, mockOctokit);
-
-      expect(result).toEqual([{ repo: 'my-org/repo2', 'secret-scanning': true }]);
-      expect(mockOctokit.rest.repos.get).not.toHaveBeenCalled();
-    });
-
-    test('should filter custom-property selector by fork status', async () => {
-      mockOctokit.rest.orgs.get.mockResolvedValue({ data: { login: 'my-org' } });
-      mockOctokit.request.mockResolvedValueOnce({
-        data: [
-          {
-            repository_id: 1,
-            repository_name: 'repo1',
-            repository_full_name: 'my-org/repo1',
-            repository_fork: true,
-            properties: [{ property_name: 'environment', value: 'production' }]
-          },
-          {
-            repository_id: 2,
-            repository_name: 'repo2',
-            repository_full_name: 'my-org/repo2',
-            repository_fork: false,
-            properties: [{ property_name: 'environment', value: 'production' }]
-          }
-        ]
-      });
-
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              'custom-property': {
-                name: 'environment',
-                values: ['production']
-              },
-              fork: false
-            },
-            settings: {
-              'code-scanning': true
-            }
-          }
-        ]
-      };
-
-      const result = await parseConfigWithRules(config, mockOctokit);
-
-      expect(result).toEqual([{ repo: 'my-org/repo2', 'code-scanning': true }]);
     });
 
     test('should handle multiple repos from different rules', async () => {
@@ -1199,62 +1100,6 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       await expect(parseConfigWithRules(configWithArray, mockOctokit)).rejects.toThrow(
         'Rule 1: settings must be an object, got array'
-      );
-    });
-
-    test('should throw error when selector fork filter is not a boolean', async () => {
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              repos: ['my-org/repo1'],
-              fork: 'true'
-            },
-            settings: { 'allow-squash-merge': true }
-          }
-        ]
-      };
-
-      await expect(parseConfigWithRules(config, mockOctokit)).rejects.toThrow(
-        'Rule 1: selector "fork" must be a boolean, got string'
-      );
-    });
-
-    test('should treat all false the same as unset when another selector is present', async () => {
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              repos: ['my-org/repo1'],
-              all: false
-            },
-            settings: { 'allow-squash-merge': true }
-          }
-        ]
-      };
-
-      const result = await parseConfigWithRules(config, mockOctokit);
-
-      expect(result).toEqual([{ repo: 'my-org/repo1', 'allow-squash-merge': true }]);
-    });
-
-    test('should throw error when selector all is not a boolean', async () => {
-      const config = {
-        owner: 'my-org',
-        rules: [
-          {
-            selector: {
-              all: 'true'
-            },
-            settings: { 'allow-squash-merge': true }
-          }
-        ]
-      };
-
-      await expect(parseConfigWithRules(config, mockOctokit)).rejects.toThrow(
-        'Rule 1: selector "all" must be a boolean, got string'
       );
     });
   });

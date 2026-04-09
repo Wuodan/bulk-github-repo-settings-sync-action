@@ -186,28 +186,6 @@ async function getOrgRepositoriesWithProperties(octokit, owner) {
 }
 
 /**
- * Get the fork status for a repository, using a cache to avoid duplicate API calls.
- * @param {Octokit} octokit - Octokit instance
- * @param {string} repoFullName - Repository full name in owner/repo format
- * @param {Map<string, boolean>} forkStatusCache - Cache keyed by repo full name
- * @returns {Promise<boolean>} True when the repository is a fork
- */
-async function getRepositoryForkStatus(octokit, repoFullName, forkStatusCache) {
-  if (forkStatusCache.has(repoFullName)) {
-    return forkStatusCache.get(repoFullName);
-  }
-
-  const [repoOwner, repoName] = repoFullName.split('/');
-  const { data } = await octokit.rest.repos.get({
-    owner: repoOwner,
-    repo: repoName
-  });
-
-  forkStatusCache.set(repoFullName, data.fork);
-  return data.fork;
-}
-
-/**
  * Filter repositories by custom property value
  * Uses the efficient org-level API that returns all repos with properties in one call
  * @param {Octokit} octokit - Octokit instance
@@ -293,7 +271,6 @@ export async function parseConfigWithRules(config, octokit) {
   // Cache for org repos with properties (to avoid refetching for each rule)
   // Cache for org verification and repo properties fetch
   let cachedReposWithProperties = null;
-  const forkStatusCache = new Map();
   let orgVerified = false;
 
   // Map to track repositories and their merged settings
@@ -322,14 +299,6 @@ export async function parseConfigWithRules(config, octokit) {
     }
 
     let matchedRepos = [];
-
-    if (rule.selector.all !== undefined && typeof rule.selector.all !== 'boolean') {
-      throw new Error(`Rule ${i + 1}: selector "all" must be a boolean, got ${typeof rule.selector.all}`);
-    }
-
-    if (rule.selector.fork !== undefined && typeof rule.selector.fork !== 'boolean') {
-      throw new Error(`Rule ${i + 1}: selector "fork" must be a boolean, got ${typeof rule.selector.fork}`);
-    }
 
     // Handle custom-property selector
     if (rule.selector['custom-property']) {
@@ -402,10 +371,7 @@ export async function parseConfigWithRules(config, octokit) {
             return false;
           });
         })
-        .map(repo => ({
-          repo: repo.repository_full_name,
-          fork: repo.repository_fork
-        }));
+        .map(repo => repo.repository_full_name);
 
       core.info(`  → Matched ${matchedRepos.length} repositories`);
     }
@@ -423,7 +389,7 @@ export async function parseConfigWithRules(config, octokit) {
       matchedRepos = rule.selector.repos.map(repo => {
         const trimmedRepo = repo.trim();
         // If repo doesn't include owner, prepend it
-        return { repo: trimmedRepo.includes('/') ? trimmedRepo : `${owner}/${trimmedRepo}` };
+        return trimmedRepo.includes('/') ? trimmedRepo : `${owner}/${trimmedRepo}`;
       });
       core.info(`Rule ${i + 1}: Targeting ${matchedRepos.length} explicit repositories`);
     }
@@ -454,10 +420,10 @@ export async function parseConfigWithRules(config, octokit) {
           : await octokit.rest.repos.listForUser({ username: owner, type: 'all', per_page: perPage, page });
 
         if (data.length === 0 || data.length < perPage) {
-          matchedRepos.push(...data.map(r => ({ repo: r.full_name, fork: r.fork })));
+          matchedRepos.push(...data.map(r => r.full_name));
           hasMore = false;
         } else {
-          matchedRepos.push(...data.map(r => ({ repo: r.full_name, fork: r.fork })));
+          matchedRepos.push(...data.map(r => r.full_name));
           page++;
         }
       }
@@ -466,30 +432,14 @@ export async function parseConfigWithRules(config, octokit) {
       throw new Error(`Rule ${i + 1}: selector must have "custom-property", "repos", or "all" property`);
     }
 
-    if (rule.selector.fork !== undefined) {
-      const matchedReposWithForkStatus = await Promise.all(
-        matchedRepos.map(async matchedRepo => {
-          if (matchedRepo.fork !== undefined) {
-            return matchedRepo;
-          }
-
-          const repoForkStatus = await getRepositoryForkStatus(octokit, matchedRepo.repo, forkStatusCache);
-          return { ...matchedRepo, fork: repoForkStatus };
-        })
-      );
-
-      matchedRepos = matchedReposWithForkStatus.filter(matchedRepo => matchedRepo.fork === rule.selector.fork);
-      core.info(`  → After fork filter (${rule.selector.fork}), ${matchedRepos.length} repositories remain`);
-    }
-
     // Merge settings for each matched repo
-    for (const matchedRepo of matchedRepos) {
-      const existingSettings = repoSettingsMap.get(matchedRepo.repo) || { repo: matchedRepo.repo };
+    for (const repoName of matchedRepos) {
+      const existingSettings = repoSettingsMap.get(repoName) || { repo: repoName };
       // Merge settings (later rules override earlier ones)
       // Destructure to exclude 'repo' from rule.settings to prevent accidental overwrites
       // eslint-disable-next-line no-unused-vars
       const { repo: _ignoredRepo, ...safeSettings } = rule.settings;
-      repoSettingsMap.set(matchedRepo.repo, { ...existingSettings, ...safeSettings });
+      repoSettingsMap.set(repoName, { ...existingSettings, ...safeSettings });
     }
   }
 
