@@ -870,6 +870,7 @@ Output shows what would change:
 | `package-json-pr-title`           | Title for pull requests when updating package.json                                                                                         | No       | `chore: update package.json`            |
 | `dry-run`                         | Preview changes without applying them (logs what would be changed)                                                                         | No       | `false`                                 |
 | `write-job-summary`               | Write a summary table to the GitHub Actions job summary                                                                                    | No       | `true`                                  |
+| `summary-heading`             | Custom heading for the GitHub Actions job summary                                                                                          | No       | `Bulk Repository Settings Update Results` |
 
 \* Repository selection: Use `repositories` (comma-separated list or `"all"`), `repositories-file`, or custom property filtering (`owner` + `custom-property-name` + `custom-property-value`)
 
