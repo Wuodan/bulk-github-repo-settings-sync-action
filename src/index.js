@@ -876,6 +876,213 @@ function createSubResult(kind, status, message, extra) {
   return sub;
 }
 
+function getFeatureResultStem(featureId) {
+  const [firstPart, ...rest] = featureId.split('-');
+  return firstPart + rest.map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
+}
+
+function capitalizeLabel(label) {
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+async function handleBooleanFeatureToggle({
+  result,
+  desiredValue,
+  dryRun,
+  featureId,
+  label,
+  resultStem,
+  getCurrentValue,
+  enable,
+  disable,
+  onWarning
+}) {
+  if (desiredValue === null) {
+    return;
+  }
+
+  const featureStem = resultStem || getFeatureResultStem(featureId);
+  const featureKey = capitalizeLabel(featureStem);
+  const currentResultKey = `current${featureKey}`;
+  const changeResultKey = `${featureStem}Change`;
+  const updatedResultKey = `${featureStem}Updated`;
+  const wouldUpdateResultKey = `${featureStem}WouldUpdate`;
+  const unchangedResultKey = `${featureStem}Unchanged`;
+  const warningResultKey = `${featureStem}Warning`;
+
+  try {
+    const currentValue = await getCurrentValue();
+    result[currentResultKey] = currentValue;
+
+    if (currentValue !== desiredValue) {
+      result[changeResultKey] = {
+        from: currentValue,
+        to: desiredValue
+      };
+
+      if (!dryRun) {
+        if (desiredValue) {
+          await enable();
+        } else {
+          await disable();
+        }
+        result[updatedResultKey] = true;
+      } else {
+        result[wouldUpdateResultKey] = true;
+      }
+
+      const action = desiredValue ? 'enable' : 'disable';
+      const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
+      result.subResults.push(createSubResult(featureId, SubResultStatus.CHANGED, `${actionText} ${label}`));
+    } else {
+      result[unchangedResultKey] = true;
+    }
+  } catch (error) {
+    result[warningResultKey] = `Could not process ${label}: ${error.message}`;
+    result.hasWarnings = true;
+    result.subResults.push(createSubResult(featureId, SubResultStatus.WARNING, `${capitalizeLabel(label)} produced a warning`));
+
+    if (onWarning) {
+      onWarning(error);
+    }
+  }
+}
+
+/**
+ * Handle a boolean feature backed by GitHub's GET + PUT/DELETE endpoint pattern.
+ * @param {Object} options - Endpoint toggle options
+ * @param {Object} options.octokit - Octokit client
+ * @param {string} options.owner - Repository owner
+ * @param {string} options.repoName - Repository name
+ * @param {Object} options.result - Mutable repository result object
+ * @param {boolean|null} options.desiredValue - Desired feature state; null skips handling
+ * @param {boolean} options.dryRun - Preview mode without applying changes
+ * @param {string} options.featureId - Hyphenated feature identifier used for sub-results
+ * @param {string} options.label - Human-readable label used in messages
+ * @param {string} options.getRoute - REST route for reading the current state
+ * @param {string} options.setRoute - REST path used for both enabling and disabling
+ * @param {Function} options.readCurrentValue - Maps the GET response into a boolean
+ * @param {number|boolean} [options.notFoundMeans] - Treat 404 from GET as this boolean current value
+ * @param {Object} [options.headers] - Optional request headers
+ * @param {Function} [options.onWarning] - Optional callback invoked after warning state is set
+ * @returns {Promise<void>}
+ */
+async function handleBooleanEndpointToggle({
+  octokit,
+  owner,
+  repoName,
+  result,
+  desiredValue,
+  dryRun,
+  featureId,
+  label,
+  getRoute,
+  setRoute,
+  readCurrentValue,
+  notFoundMeans,
+  headers,
+  onWarning
+}) {
+  return handleBooleanFeatureToggle({
+    result,
+    desiredValue,
+    dryRun,
+    featureId,
+    label,
+    getCurrentValue: async () => {
+      try {
+        const response = await octokit.request(getRoute, {
+          owner,
+          repo: repoName,
+          headers
+        });
+        return readCurrentValue(response);
+      } catch (error) {
+        if (error.status === 404 && typeof notFoundMeans === 'boolean') {
+          return notFoundMeans;
+        }
+        throw error;
+      }
+    },
+    enable: async () =>
+      octokit.request(`PUT ${setRoute}`, {
+        owner,
+        repo: repoName,
+        headers
+      }),
+    disable: async () =>
+      octokit.request(`DELETE ${setRoute}`, {
+        owner,
+        repo: repoName,
+        headers
+      }),
+    onWarning
+  });
+}
+
+/**
+ * Handle a boolean feature managed via `security_and_analysis` repo updates.
+ * @param {Object} options - Security setting toggle options
+ * @param {Object} options.octokit - Octokit client
+ * @param {string} options.owner - Repository owner
+ * @param {string} options.repoName - Repository name
+ * @param {Object} options.currentRepo - Current repository payload
+ * @param {Object} options.result - Mutable repository result object
+ * @param {boolean|null} options.desiredValue - Desired feature state; null skips handling
+ * @param {boolean} options.dryRun - Preview mode without applying changes
+ * @param {string} options.featureId - Hyphenated feature identifier used for sub-results
+ * @param {string} options.label - Human-readable label used in messages
+ * @param {string} options.securityAnalysisKey - Key under `security_and_analysis`
+ * @param {string} [options.resultStem] - Optional camelCase override for legacy result keys
+ * @param {Function} [options.onWarning] - Optional callback invoked after warning state is set
+ * @returns {Promise<void>}
+ */
+async function handleSecurityAnalysisToggle({
+  octokit,
+  owner,
+  repoName,
+  currentRepo,
+  result,
+  desiredValue,
+  dryRun,
+  featureId,
+  label,
+  securityAnalysisKey,
+  resultStem,
+  onWarning
+}) {
+  return handleBooleanFeatureToggle({
+    result,
+    desiredValue,
+    dryRun,
+    featureId,
+    label,
+    resultStem,
+    getCurrentValue: async () => currentRepo.security_and_analysis?.[securityAnalysisKey]?.status === 'enabled',
+    enable: async () =>
+      octokit.rest.repos.update({
+        owner,
+        repo: repoName,
+        security_and_analysis: {
+          [securityAnalysisKey]: {
+            status: 'enabled'
+          }
+        }
+      }),
+    disable: async () =>
+      octokit.rest.repos.update({
+        owner,
+        repo: repoName,
+        security_and_analysis: {
+          [securityAnalysisKey]: {
+            status: 'disabled'
+          }
+        }
+      }),
+    onWarning
+  });
+}
+
 /**
  * Format a curated summary message for a sub-result in the summary table.
  * Uses the label map for human-readable names and sync status for phrasing.
@@ -1345,123 +1552,39 @@ export async function updateRepositorySettings(
     }
 
     // Handle immutable releases
-    if (immutableReleases !== null) {
-      try {
-        // Check current immutable releases status
-        let currentImmutableReleases = false;
-        try {
-          const response = await octokit.request('GET /repos/{owner}/{repo}/immutable-releases', {
-            owner,
-            repo: repoName,
-            headers: {
-              'X-GitHub-Api-Version': '2022-11-28'
-            }
-          });
-          // Check the 'enabled' property in the response
-          currentImmutableReleases = response.data.enabled === true;
-        } catch (error) {
-          // 404 means immutable releases are not enabled
-          if (error.status === 404) {
-            currentImmutableReleases = false;
-          } else {
-            throw error;
-          }
-        }
-
-        result.currentImmutableReleases = currentImmutableReleases;
-
-        if (currentImmutableReleases !== immutableReleases) {
-          result.immutableReleasesChange = {
-            from: currentImmutableReleases,
-            to: immutableReleases
-          };
-
-          if (!dryRun) {
-            if (immutableReleases) {
-              // Enable immutable releases
-              await octokit.request('PUT /repos/{owner}/{repo}/immutable-releases', {
-                owner,
-                repo: repoName,
-                headers: {
-                  'X-GitHub-Api-Version': '2022-11-28'
-                }
-              });
-            } else {
-              // Disable immutable releases
-              await octokit.request('DELETE /repos/{owner}/{repo}/immutable-releases', {
-                owner,
-                repo: repoName,
-                headers: {
-                  'X-GitHub-Api-Version': '2022-11-28'
-                }
-              });
-            }
-            result.immutableReleasesUpdated = true;
-          } else {
-            result.immutableReleasesWouldUpdate = true;
-          }
-          const action = immutableReleases ? 'enable' : 'disable';
-          const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-          result.subResults.push(
-            createSubResult('immutable-releases', SubResultStatus.CHANGED, `${actionText} immutable releases`)
-          );
-        } else {
-          result.immutableReleasesUnchanged = true;
-        }
-      } catch (error) {
-        // Immutable releases might fail for various reasons (insufficient permissions, not available, etc.)
-        result.immutableReleasesWarning = `Could not process immutable releases: ${error.message}`;
-        result.hasWarnings = true;
-        result.subResults.push(
-          createSubResult('immutable-releases', SubResultStatus.WARNING, 'Immutable releases produced a warning')
-        );
+    await handleBooleanEndpointToggle({
+      octokit,
+      owner,
+      repoName,
+      result,
+      desiredValue: immutableReleases,
+      dryRun,
+      featureId: 'immutable-releases',
+      label: 'immutable releases',
+      getRoute: 'GET /repos/{owner}/{repo}/immutable-releases',
+      setRoute: '/repos/{owner}/{repo}/immutable-releases',
+      readCurrentValue: response => response.data.enabled === true,
+      notFoundMeans: false,
+      headers: {
+        'X-GitHub-Api-Version': '2022-11-28'
       }
-    }
+    });
 
     // Handle security settings (only if securitySettings object is provided)
     if (securitySettings) {
       // Handle secret scanning settings
-      if (securitySettings.secretScanning !== null) {
-        try {
-          // Get current secret scanning status from security_and_analysis
-          const currentSecretScanning = currentRepo.security_and_analysis?.secret_scanning?.status === 'enabled';
-          result.currentSecretScanning = currentSecretScanning;
-
-          if (currentSecretScanning !== securitySettings.secretScanning) {
-            result.secretScanningChange = {
-              from: currentSecretScanning,
-              to: securitySettings.secretScanning
-            };
-
-            if (!dryRun) {
-              await octokit.rest.repos.update({
-                owner,
-                repo: repoName,
-                security_and_analysis: {
-                  secret_scanning: {
-                    status: securitySettings.secretScanning ? 'enabled' : 'disabled'
-                  }
-                }
-              });
-              result.secretScanningUpdated = true;
-            } else {
-              result.secretScanningWouldUpdate = true;
-            }
-            const action = securitySettings.secretScanning ? 'enable' : 'disable';
-            const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-            result.subResults.push(
-              createSubResult('secret-scanning', SubResultStatus.CHANGED, `${actionText} secret scanning`)
-            );
-          } else {
-            result.secretScanningUnchanged = true;
-          }
-        } catch (error) {
-          result.secretScanningWarning = `Could not process secret scanning: ${error.message}`;
-          result.hasWarnings = true;
-          result.subResults.push(
-            createSubResult('secret-scanning', SubResultStatus.WARNING, 'Secret scanning produced a warning')
-          );
-          // If secret scanning is not available, push protection can't work either
+      await handleSecurityAnalysisToggle({
+        octokit,
+        owner,
+        repoName,
+        currentRepo,
+        result,
+        desiredValue: securitySettings.secretScanning,
+        dryRun,
+        featureId: 'secret-scanning',
+        label: 'secret scanning',
+        securityAnalysisKey: 'secret_scanning',
+        onWarning: error => {
           if (
             securitySettings.secretScanningPushProtection === true &&
             typeof error.status === 'number' &&
@@ -1478,281 +1601,81 @@ export async function updateRepositorySettings(
             );
           }
         }
-      }
+      });
 
       // Handle secret scanning push protection settings
       // Skip if we already set a cascade warning from secret scanning failure
       if (securitySettings.secretScanningPushProtection !== null && !result.secretScanningPushProtectionWarning) {
-        try {
-          // Get current push protection status from security_and_analysis
-          const currentPushProtection =
-            currentRepo.security_and_analysis?.secret_scanning_push_protection?.status === 'enabled';
-          result.currentSecretScanningPushProtection = currentPushProtection;
-
-          if (currentPushProtection !== securitySettings.secretScanningPushProtection) {
-            result.secretScanningPushProtectionChange = {
-              from: currentPushProtection,
-              to: securitySettings.secretScanningPushProtection
-            };
-
-            if (!dryRun) {
-              await octokit.rest.repos.update({
-                owner,
-                repo: repoName,
-                security_and_analysis: {
-                  secret_scanning_push_protection: {
-                    status: securitySettings.secretScanningPushProtection ? 'enabled' : 'disabled'
-                  }
-                }
-              });
-              result.secretScanningPushProtectionUpdated = true;
-            } else {
-              result.secretScanningPushProtectionWouldUpdate = true;
-            }
-            const action = securitySettings.secretScanningPushProtection ? 'enable' : 'disable';
-            const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-            result.subResults.push(
-              createSubResult(
-                'push-protection',
-                SubResultStatus.CHANGED,
-                `${actionText} secret scanning push protection`
-              )
-            );
-          } else {
-            result.secretScanningPushProtectionUnchanged = true;
-          }
-        } catch (error) {
-          result.secretScanningPushProtectionWarning = `Could not process secret scanning push protection: ${error.message}`;
-          result.hasWarnings = true;
-          result.subResults.push(
-            createSubResult(
-              'push-protection',
-              SubResultStatus.WARNING,
-              'Secret scanning push protection produced a warning'
-            )
-          );
-        }
+        await handleSecurityAnalysisToggle({
+          octokit,
+          owner,
+          repoName,
+          currentRepo,
+          result,
+          desiredValue: securitySettings.secretScanningPushProtection,
+          dryRun,
+          featureId: 'push-protection',
+          label: 'secret scanning push protection',
+          securityAnalysisKey: 'secret_scanning_push_protection',
+          resultStem: 'secretScanningPushProtection',
+        });
       }
 
       // Handle private vulnerability reporting
-      if (securitySettings.privateVulnerabilityReporting !== null) {
-        try {
-          const response = await octokit.request('GET /repos/{owner}/{repo}/private-vulnerability-reporting', {
-            owner,
-            repo: repoName,
-            headers: {
-              'X-GitHub-Api-Version': '2022-11-28'
-            }
-          });
-          const currentPrivateVulnerabilityReporting = response.data.enabled === true;
-          result.currentPrivateVulnerabilityReporting = currentPrivateVulnerabilityReporting;
-
-          if (currentPrivateVulnerabilityReporting !== securitySettings.privateVulnerabilityReporting) {
-            result.privateVulnerabilityReportingChange = {
-              from: currentPrivateVulnerabilityReporting,
-              to: securitySettings.privateVulnerabilityReporting
-            };
-
-            if (!dryRun) {
-              if (securitySettings.privateVulnerabilityReporting) {
-                await octokit.request('PUT /repos/{owner}/{repo}/private-vulnerability-reporting', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              } else {
-                await octokit.request('DELETE /repos/{owner}/{repo}/private-vulnerability-reporting', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              }
-              result.privateVulnerabilityReportingUpdated = true;
-            } else {
-              result.privateVulnerabilityReportingWouldUpdate = true;
-            }
-            const action = securitySettings.privateVulnerabilityReporting ? 'enable' : 'disable';
-            const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-            result.subResults.push(
-              createSubResult(
-                'private-vulnerability-reporting',
-                SubResultStatus.CHANGED,
-                `${actionText} private vulnerability reporting`
-              )
-            );
-          } else {
-            result.privateVulnerabilityReportingUnchanged = true;
-          }
-        } catch (error) {
-          result.privateVulnerabilityReportingWarning =
-            `Could not process private vulnerability reporting: ${error.message}`;
-          result.hasWarnings = true;
-          result.subResults.push(
-            createSubResult(
-              'private-vulnerability-reporting',
-              SubResultStatus.WARNING,
-              'Private vulnerability reporting produced a warning'
-            )
-          );
+      await handleBooleanEndpointToggle({
+        octokit,
+        owner,
+        repoName,
+        result,
+        desiredValue: securitySettings.privateVulnerabilityReporting,
+        dryRun,
+        featureId: 'private-vulnerability-reporting',
+        label: 'private vulnerability reporting',
+        getRoute: 'GET /repos/{owner}/{repo}/private-vulnerability-reporting',
+        setRoute: '/repos/{owner}/{repo}/private-vulnerability-reporting',
+        readCurrentValue: response => response.data.enabled === true,
+        headers: {
+          'X-GitHub-Api-Version': '2022-11-28'
         }
-      }
+      });
 
       // Handle Dependabot alerts (vulnerability alerts)
-      if (securitySettings.dependabotAlerts !== null) {
-        try {
-          // Check current vulnerability alerts status
-          let currentDependabotAlerts = false;
-          try {
-            await octokit.request('GET /repos/{owner}/{repo}/vulnerability-alerts', {
-              owner,
-              repo: repoName,
-              headers: {
-                'X-GitHub-Api-Version': '2022-11-28'
-              }
-            });
-            // 204 means enabled
-            currentDependabotAlerts = true;
-          } catch (error) {
-            // 404 means disabled
-            if (error.status === 404) {
-              currentDependabotAlerts = false;
-            } else {
-              throw error;
-            }
-          }
-
-          result.currentDependabotAlerts = currentDependabotAlerts;
-
-          if (currentDependabotAlerts !== securitySettings.dependabotAlerts) {
-            result.dependabotAlertsChange = {
-              from: currentDependabotAlerts,
-              to: securitySettings.dependabotAlerts
-            };
-
-            if (!dryRun) {
-              if (securitySettings.dependabotAlerts) {
-                // Enable vulnerability alerts (also enables dependency graph)
-                await octokit.request('PUT /repos/{owner}/{repo}/vulnerability-alerts', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              } else {
-                // Disable vulnerability alerts
-                await octokit.request('DELETE /repos/{owner}/{repo}/vulnerability-alerts', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              }
-              result.dependabotAlertsUpdated = true;
-            } else {
-              result.dependabotAlertsWouldUpdate = true;
-            }
-            const action = securitySettings.dependabotAlerts ? 'enable' : 'disable';
-            const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-            result.subResults.push(
-              createSubResult('dependabot-alerts', SubResultStatus.CHANGED, `${actionText} Dependabot alerts`)
-            );
-          } else {
-            result.dependabotAlertsUnchanged = true;
-          }
-        } catch (error) {
-          result.dependabotAlertsWarning = `Could not process Dependabot alerts: ${error.message}`;
-          result.hasWarnings = true;
-          result.subResults.push(
-            createSubResult('dependabot-alerts', SubResultStatus.WARNING, 'Dependabot alerts produced a warning')
-          );
+      await handleBooleanEndpointToggle({
+        octokit,
+        owner,
+        repoName,
+        result,
+        desiredValue: securitySettings.dependabotAlerts,
+        dryRun,
+        featureId: 'dependabot-alerts',
+        label: 'Dependabot alerts',
+        getRoute: 'GET /repos/{owner}/{repo}/vulnerability-alerts',
+        setRoute: '/repos/{owner}/{repo}/vulnerability-alerts',
+        readCurrentValue: () => true,
+        notFoundMeans: false,
+        headers: {
+          'X-GitHub-Api-Version': '2022-11-28'
         }
-      }
+      });
 
       // Handle Dependabot security updates
-      if (securitySettings.dependabotSecurityUpdates !== null) {
-        try {
-          // Check current Dependabot security updates status
-          let currentDependabotSecurityUpdates = false;
-          try {
-            const response = await octokit.request('GET /repos/{owner}/{repo}/automated-security-fixes', {
-              owner,
-              repo: repoName,
-              headers: {
-                'X-GitHub-Api-Version': '2022-11-28'
-              }
-            });
-            currentDependabotSecurityUpdates = response.data.enabled === true;
-          } catch (error) {
-            // 404 means disabled
-            if (error.status === 404) {
-              currentDependabotSecurityUpdates = false;
-            } else {
-              throw error;
-            }
-          }
-
-          result.currentDependabotSecurityUpdates = currentDependabotSecurityUpdates;
-
-          if (currentDependabotSecurityUpdates !== securitySettings.dependabotSecurityUpdates) {
-            result.dependabotSecurityUpdatesChange = {
-              from: currentDependabotSecurityUpdates,
-              to: securitySettings.dependabotSecurityUpdates
-            };
-
-            if (!dryRun) {
-              if (securitySettings.dependabotSecurityUpdates) {
-                // Enable Dependabot security updates
-                await octokit.request('PUT /repos/{owner}/{repo}/automated-security-fixes', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              } else {
-                // Disable Dependabot security updates
-                await octokit.request('DELETE /repos/{owner}/{repo}/automated-security-fixes', {
-                  owner,
-                  repo: repoName,
-                  headers: {
-                    'X-GitHub-Api-Version': '2022-11-28'
-                  }
-                });
-              }
-              result.dependabotSecurityUpdatesUpdated = true;
-            } else {
-              result.dependabotSecurityUpdatesWouldUpdate = true;
-            }
-            const action = securitySettings.dependabotSecurityUpdates ? 'enable' : 'disable';
-            const actionText = dryRun ? `Would ${action}` : `${action.charAt(0).toUpperCase()}${action.slice(1)}d`;
-            result.subResults.push(
-              createSubResult(
-                'dependabot-security-updates',
-                SubResultStatus.CHANGED,
-                `${actionText} Dependabot security updates`
-              )
-            );
-          } else {
-            result.dependabotSecurityUpdatesUnchanged = true;
-          }
-        } catch (error) {
-          result.dependabotSecurityUpdatesWarning = `Could not process Dependabot security updates: ${error.message}`;
-          result.hasWarnings = true;
-          result.subResults.push(
-            createSubResult(
-              'dependabot-security-updates',
-              SubResultStatus.WARNING,
-              'Dependabot security updates produced a warning'
-            )
-          );
+      await handleBooleanEndpointToggle({
+        octokit,
+        owner,
+        repoName,
+        result,
+        desiredValue: securitySettings.dependabotSecurityUpdates,
+        dryRun,
+        featureId: 'dependabot-security-updates',
+        label: 'Dependabot security updates',
+        getRoute: 'GET /repos/{owner}/{repo}/automated-security-fixes',
+        setRoute: '/repos/{owner}/{repo}/automated-security-fixes',
+        readCurrentValue: response => response.data.enabled === true,
+        notFoundMeans: false,
+        headers: {
+          'X-GitHub-Api-Version': '2022-11-28'
         }
-      }
+      });
     } // End of if (securitySettings)
 
     return result;
