@@ -885,6 +885,25 @@ function capitalizeLabel(label) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+const REPOSITORY_SETTING_FIELDS = Object.freeze([
+  { key: 'allow_squash_merge' },
+  { key: 'squash_merge_commit_title' },
+  {
+    key: 'squash_merge_commit_message',
+    requiredCompanionField: 'squash_merge_commit_title'
+  },
+  { key: 'allow_merge_commit' },
+  { key: 'merge_commit_title' },
+  {
+    key: 'merge_commit_message',
+    requiredCompanionField: 'merge_commit_title'
+  },
+  { key: 'allow_rebase_merge' },
+  { key: 'allow_auto_merge' },
+  { key: 'delete_branch_on_merge' },
+  { key: 'allow_update_branch' }
+]);
+
 async function handleBooleanFeatureToggle({
   result,
   desiredValue,
@@ -1278,122 +1297,24 @@ export async function updateRepositorySettings(
     const changes = [];
     const currentSettings = {};
 
-    // Only add settings that are explicitly set (not null) and track changes
-    if (settings.allow_squash_merge !== null) {
-      updateParams.allow_squash_merge = settings.allow_squash_merge;
-      currentSettings.allow_squash_merge = currentRepo.allow_squash_merge;
-      if (currentRepo.allow_squash_merge !== settings.allow_squash_merge) {
+    for (const field of REPOSITORY_SETTING_FIELDS) {
+      const desiredValue = settings[field.key];
+      if (desiredValue === null) {
+        continue;
+      }
+
+      updateParams[field.key] = desiredValue;
+      currentSettings[field.key] = currentRepo[field.key];
+
+      if (field.requiredCompanionField && !updateParams[field.requiredCompanionField]) {
+        updateParams[field.requiredCompanionField] = currentRepo[field.requiredCompanionField];
+      }
+
+      if (currentRepo[field.key] !== desiredValue) {
         changes.push({
-          setting: 'allow_squash_merge',
-          from: currentRepo.allow_squash_merge,
-          to: settings.allow_squash_merge
-        });
-      }
-    }
-    if (settings.squash_merge_commit_title !== null) {
-      updateParams.squash_merge_commit_title = settings.squash_merge_commit_title;
-      currentSettings.squash_merge_commit_title = currentRepo.squash_merge_commit_title;
-      if (currentRepo.squash_merge_commit_title !== settings.squash_merge_commit_title) {
-        changes.push({
-          setting: 'squash_merge_commit_title',
-          from: currentRepo.squash_merge_commit_title,
-          to: settings.squash_merge_commit_title
-        });
-      }
-    }
-    if (settings.squash_merge_commit_message !== null) {
-      updateParams.squash_merge_commit_message = settings.squash_merge_commit_message;
-      // GitHub API requires squash_merge_commit_title when squash_merge_commit_message is set
-      if (!updateParams.squash_merge_commit_title) {
-        updateParams.squash_merge_commit_title = currentRepo.squash_merge_commit_title;
-      }
-      currentSettings.squash_merge_commit_message = currentRepo.squash_merge_commit_message;
-      if (currentRepo.squash_merge_commit_message !== settings.squash_merge_commit_message) {
-        changes.push({
-          setting: 'squash_merge_commit_message',
-          from: currentRepo.squash_merge_commit_message,
-          to: settings.squash_merge_commit_message
-        });
-      }
-    }
-    if (settings.allow_merge_commit !== null) {
-      updateParams.allow_merge_commit = settings.allow_merge_commit;
-      currentSettings.allow_merge_commit = currentRepo.allow_merge_commit;
-      if (currentRepo.allow_merge_commit !== settings.allow_merge_commit) {
-        changes.push({
-          setting: 'allow_merge_commit',
-          from: currentRepo.allow_merge_commit,
-          to: settings.allow_merge_commit
-        });
-      }
-    }
-    if (settings.merge_commit_title !== null) {
-      updateParams.merge_commit_title = settings.merge_commit_title;
-      currentSettings.merge_commit_title = currentRepo.merge_commit_title;
-      if (currentRepo.merge_commit_title !== settings.merge_commit_title) {
-        changes.push({
-          setting: 'merge_commit_title',
-          from: currentRepo.merge_commit_title,
-          to: settings.merge_commit_title
-        });
-      }
-    }
-    if (settings.merge_commit_message !== null) {
-      updateParams.merge_commit_message = settings.merge_commit_message;
-      // GitHub API requires merge_commit_title when merge_commit_message is set
-      if (!updateParams.merge_commit_title) {
-        updateParams.merge_commit_title = currentRepo.merge_commit_title;
-      }
-      currentSettings.merge_commit_message = currentRepo.merge_commit_message;
-      if (currentRepo.merge_commit_message !== settings.merge_commit_message) {
-        changes.push({
-          setting: 'merge_commit_message',
-          from: currentRepo.merge_commit_message,
-          to: settings.merge_commit_message
-        });
-      }
-    }
-    if (settings.allow_rebase_merge !== null) {
-      updateParams.allow_rebase_merge = settings.allow_rebase_merge;
-      currentSettings.allow_rebase_merge = currentRepo.allow_rebase_merge;
-      if (currentRepo.allow_rebase_merge !== settings.allow_rebase_merge) {
-        changes.push({
-          setting: 'allow_rebase_merge',
-          from: currentRepo.allow_rebase_merge,
-          to: settings.allow_rebase_merge
-        });
-      }
-    }
-    if (settings.allow_auto_merge !== null) {
-      updateParams.allow_auto_merge = settings.allow_auto_merge;
-      currentSettings.allow_auto_merge = currentRepo.allow_auto_merge;
-      if (currentRepo.allow_auto_merge !== settings.allow_auto_merge) {
-        changes.push({
-          setting: 'allow_auto_merge',
-          from: currentRepo.allow_auto_merge,
-          to: settings.allow_auto_merge
-        });
-      }
-    }
-    if (settings.delete_branch_on_merge !== null) {
-      updateParams.delete_branch_on_merge = settings.delete_branch_on_merge;
-      currentSettings.delete_branch_on_merge = currentRepo.delete_branch_on_merge;
-      if (currentRepo.delete_branch_on_merge !== settings.delete_branch_on_merge) {
-        changes.push({
-          setting: 'delete_branch_on_merge',
-          from: currentRepo.delete_branch_on_merge,
-          to: settings.delete_branch_on_merge
-        });
-      }
-    }
-    if (settings.allow_update_branch !== null) {
-      updateParams.allow_update_branch = settings.allow_update_branch;
-      currentSettings.allow_update_branch = currentRepo.allow_update_branch;
-      if (currentRepo.allow_update_branch !== settings.allow_update_branch) {
-        changes.push({
-          setting: 'allow_update_branch',
-          from: currentRepo.allow_update_branch,
-          to: settings.allow_update_branch
+          setting: field.key,
+          from: currentRepo[field.key],
+          to: desiredValue
         });
       }
     }
