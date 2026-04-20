@@ -1083,6 +1083,37 @@ async function handleSecurityAnalysisToggle({
   });
 }
 
+function createRepoUpdater({
+  octokit,
+  owner,
+  repoName,
+  currentRepo,
+  result,
+  dryRun
+}) {
+  return {
+    handleBooleanEndpointToggle: options =>
+      handleBooleanEndpointToggle({
+        octokit,
+        owner,
+        repoName,
+        result,
+        dryRun,
+        ...options
+      }),
+    handleSecurityAnalysisToggle: options =>
+      handleSecurityAnalysisToggle({
+        octokit,
+        owner,
+        repoName,
+        currentRepo,
+        result,
+        dryRun,
+        ...options
+      })
+  };
+}
+
 /**
  * Format a curated summary message for a sub-result in the summary table.
  * Uses the label map for human-readable names and sync status for phrasing.
@@ -1416,6 +1447,15 @@ export async function updateRepositorySettings(
       dryRun
     };
 
+    const repoUpdater = createRepoUpdater({
+      octokit,
+      owner,
+      repoName,
+      currentRepo,
+      result,
+      dryRun
+    });
+
     // Update repository settings (skip in dry-run mode)
     if (!dryRun && changes.length > 0) {
       await octokit.rest.repos.update(updateParams);
@@ -1552,13 +1592,8 @@ export async function updateRepositorySettings(
     }
 
     // Handle immutable releases
-    await handleBooleanEndpointToggle({
-      octokit,
-      owner,
-      repoName,
-      result,
+    await repoUpdater.handleBooleanEndpointToggle({
       desiredValue: immutableReleases,
-      dryRun,
       featureId: 'immutable-releases',
       label: 'immutable releases',
       getRoute: 'GET /repos/{owner}/{repo}/immutable-releases',
@@ -1573,14 +1608,8 @@ export async function updateRepositorySettings(
     // Handle security settings (only if securitySettings object is provided)
     if (securitySettings) {
       // Handle secret scanning settings
-      await handleSecurityAnalysisToggle({
-        octokit,
-        owner,
-        repoName,
-        currentRepo,
-        result,
+      await repoUpdater.handleSecurityAnalysisToggle({
         desiredValue: securitySettings.secretScanning,
-        dryRun,
         featureId: 'secret-scanning',
         label: 'secret scanning',
         securityAnalysisKey: 'secret_scanning',
@@ -1606,29 +1635,18 @@ export async function updateRepositorySettings(
       // Handle secret scanning push protection settings
       // Skip if we already set a cascade warning from secret scanning failure
       if (securitySettings.secretScanningPushProtection !== null && !result.secretScanningPushProtectionWarning) {
-        await handleSecurityAnalysisToggle({
-          octokit,
-          owner,
-          repoName,
-          currentRepo,
-          result,
+        await repoUpdater.handleSecurityAnalysisToggle({
           desiredValue: securitySettings.secretScanningPushProtection,
-          dryRun,
           featureId: 'push-protection',
           label: 'secret scanning push protection',
           securityAnalysisKey: 'secret_scanning_push_protection',
-          resultStem: 'secretScanningPushProtection',
+          resultStem: 'secretScanningPushProtection'
         });
       }
 
       // Handle private vulnerability reporting
-      await handleBooleanEndpointToggle({
-        octokit,
-        owner,
-        repoName,
-        result,
+      await repoUpdater.handleBooleanEndpointToggle({
         desiredValue: securitySettings.privateVulnerabilityReporting,
-        dryRun,
         featureId: 'private-vulnerability-reporting',
         label: 'private vulnerability reporting',
         getRoute: 'GET /repos/{owner}/{repo}/private-vulnerability-reporting',
@@ -1640,13 +1658,8 @@ export async function updateRepositorySettings(
       });
 
       // Handle Dependabot alerts (vulnerability alerts)
-      await handleBooleanEndpointToggle({
-        octokit,
-        owner,
-        repoName,
-        result,
+      await repoUpdater.handleBooleanEndpointToggle({
         desiredValue: securitySettings.dependabotAlerts,
-        dryRun,
         featureId: 'dependabot-alerts',
         label: 'Dependabot alerts',
         getRoute: 'GET /repos/{owner}/{repo}/vulnerability-alerts',
@@ -1659,13 +1672,8 @@ export async function updateRepositorySettings(
       });
 
       // Handle Dependabot security updates
-      await handleBooleanEndpointToggle({
-        octokit,
-        owner,
-        repoName,
-        result,
+      await repoUpdater.handleBooleanEndpointToggle({
         desiredValue: securitySettings.dependabotSecurityUpdates,
-        dryRun,
         featureId: 'dependabot-security-updates',
         label: 'Dependabot security updates',
         getRoute: 'GET /repos/{owner}/{repo}/automated-security-fixes',
