@@ -2451,9 +2451,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
         }
       });
       mockOctokit.rest.repos.update.mockResolvedValue({});
-      mockOctokit.request
-        .mockResolvedValueOnce({ data: { enabled: false } })
-        .mockResolvedValueOnce({});
+      mockOctokit.request.mockResolvedValueOnce({ data: { enabled: false } }).mockResolvedValueOnce({});
 
       const settings = { allow_squash_merge: true };
       const securitySettings = {
@@ -2495,9 +2493,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
         }
       });
       mockOctokit.rest.repos.update.mockResolvedValue({});
-      mockOctokit.request
-        .mockResolvedValueOnce({ data: { enabled: true } })
-        .mockResolvedValueOnce({});
+      mockOctokit.request.mockResolvedValueOnce({ data: { enabled: true } }).mockResolvedValueOnce({});
 
       const settings = { allow_squash_merge: true };
       const securitySettings = {
@@ -4562,9 +4558,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       await run();
 
-      expect(mockCore.summary.addHeading).toHaveBeenCalledWith(
-        'Private custom property selection results (DRY-RUN)'
-      );
+      expect(mockCore.summary.addHeading).toHaveBeenCalledWith('Private custom property selection results (DRY-RUN)');
     });
 
     test('should process repo-specific settings overrides from YAML', async () => {

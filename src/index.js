@@ -940,7 +940,9 @@ async function handleBooleanFeatureToggle({
   } catch (error) {
     result[warningResultKey] = `Could not process ${label}: ${error.message}`;
     result.hasWarnings = true;
-    result.subResults.push(createSubResult(featureId, SubResultStatus.WARNING, `${capitalizeLabel(label)} produced a warning`));
+    result.subResults.push(
+      createSubResult(featureId, SubResultStatus.WARNING, `${capitalizeLabel(label)} produced a warning`)
+    );
 
     if (onWarning) {
       onWarning(error);
@@ -4457,9 +4459,7 @@ export async function run() {
         await summaryBuilder.write();
       } catch {
         // Fallback for local development
-        const heading = dryRun
-          ? `🔍 DRY-RUN: ${jobSummaryHeadingBase}`
-          : `📊 ${jobSummaryHeadingBase}`;
+        const heading = dryRun ? `🔍 DRY-RUN: ${jobSummaryHeadingBase}` : `📊 ${jobSummaryHeadingBase}`;
         core.info(heading);
         core.info(`Total Repositories: ${repoList.length}`);
         core.info(`Changed: ${changedCount}`);
