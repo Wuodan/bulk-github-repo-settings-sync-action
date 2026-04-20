@@ -876,15 +876,29 @@ function createSubResult(kind, status, message, extra) {
   return sub;
 }
 
+/**
+ * Convert a hyphenated feature identifier to the camelCase stem used by legacy result keys.
+ * @param {string} featureId - Hyphenated feature identifier
+ * @returns {string} camelCase result key stem
+ */
 function getFeatureResultStem(featureId) {
   const [firstPart, ...rest] = featureId.split('-');
   return firstPart + rest.map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('');
 }
 
+/**
+ * Capitalize the first character of a label for human-readable messages.
+ * @param {string} label - Label to capitalize
+ * @returns {string} Label with an uppercase first character
+ */
 function capitalizeLabel(label) {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+/**
+ * Repository settings that are diffed and synced via `repos.update`.
+ * `requiredCompanionField` is used for GitHub API fields that require a paired title value.
+ */
 const REPOSITORY_SETTING_FIELDS = Object.freeze([
   { key: 'allow_squash_merge' },
   { key: 'squash_merge_commit_title' },
@@ -904,6 +918,23 @@ const REPOSITORY_SETTING_FIELDS = Object.freeze([
   { key: 'allow_update_branch' }
 ]);
 
+/**
+ * Handle a common boolean feature toggle flow.
+ * Reads current state, compares it to the desired value, applies changes when needed,
+ * and updates the shared result structure consistently.
+ * @param {Object} options - Toggle handler options
+ * @param {Object} options.result - Mutable repository result object
+ * @param {boolean|null} options.desiredValue - Desired feature state; null skips handling
+ * @param {boolean} options.dryRun - Preview mode without applying changes
+ * @param {string} options.featureId - Hyphenated feature identifier used for sub-results
+ * @param {string} options.label - Human-readable label used in messages
+ * @param {string} [options.resultStem] - Optional camelCase override for legacy result keys
+ * @param {Function} options.getCurrentValue - Async function returning the current boolean state
+ * @param {Function} options.enable - Async function to enable the feature
+ * @param {Function} options.disable - Async function to disable the feature
+ * @param {Function} [options.onWarning] - Optional callback invoked after warning state is set
+ * @returns {Promise<void>}
+ */
 async function handleBooleanFeatureToggle({
   result,
   desiredValue,
