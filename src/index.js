@@ -951,12 +951,13 @@ async function handleBooleanFeatureToggle({
 /**
  * Handle a boolean feature backed by GitHub's GET + PUT/DELETE endpoint pattern.
  * @param {Object} options - Endpoint toggle options
- * @param {Object} options.octokit - Octokit client
- * @param {string} options.owner - Repository owner
- * @param {string} options.repoName - Repository name
- * @param {Object} options.result - Mutable repository result object
+ * @param {Object} options.ctx - Shared per-repository context
+ * @param {Object} options.ctx.octokit - Octokit client
+ * @param {string} options.ctx.owner - Repository owner
+ * @param {string} options.ctx.repoName - Repository name
+ * @param {Object} options.ctx.result - Mutable repository result object
+ * @param {boolean} options.ctx.dryRun - Preview mode without applying changes
  * @param {boolean|null} options.desiredValue - Desired feature state; null skips handling
- * @param {boolean} options.dryRun - Preview mode without applying changes
  * @param {string} options.featureId - Hyphenated feature identifier used for sub-results
  * @param {string} options.label - Human-readable label used in messages
  * @param {string} options.getRoute - REST route for reading the current state
@@ -968,12 +969,8 @@ async function handleBooleanFeatureToggle({
  * @returns {Promise<void>}
  */
 async function handleBooleanEndpointToggle({
-  octokit,
-  owner,
-  repoName,
-  result,
+  ctx,
   desiredValue,
-  dryRun,
   featureId,
   label,
   getRoute,
@@ -983,6 +980,7 @@ async function handleBooleanEndpointToggle({
   headers,
   onWarning
 }) {
+  const { octokit, owner, repoName, result, dryRun } = ctx;
   return handleBooleanFeatureToggle({
     result,
     desiredValue,
@@ -1023,13 +1021,14 @@ async function handleBooleanEndpointToggle({
 /**
  * Handle a boolean feature managed via `security_and_analysis` repo updates.
  * @param {Object} options - Security setting toggle options
- * @param {Object} options.octokit - Octokit client
- * @param {string} options.owner - Repository owner
- * @param {string} options.repoName - Repository name
- * @param {Object} options.currentRepo - Current repository payload
- * @param {Object} options.result - Mutable repository result object
+ * @param {Object} options.ctx - Shared per-repository context
+ * @param {Object} options.ctx.octokit - Octokit client
+ * @param {string} options.ctx.owner - Repository owner
+ * @param {string} options.ctx.repoName - Repository name
+ * @param {Object} options.ctx.currentRepo - Current repository payload
+ * @param {Object} options.ctx.result - Mutable repository result object
+ * @param {boolean} options.ctx.dryRun - Preview mode without applying changes
  * @param {boolean|null} options.desiredValue - Desired feature state; null skips handling
- * @param {boolean} options.dryRun - Preview mode without applying changes
  * @param {string} options.featureId - Hyphenated feature identifier used for sub-results
  * @param {string} options.label - Human-readable label used in messages
  * @param {string} options.securityAnalysisKey - Key under `security_and_analysis`
@@ -1038,19 +1037,15 @@ async function handleBooleanEndpointToggle({
  * @returns {Promise<void>}
  */
 async function handleSecurityAnalysisToggle({
-  octokit,
-  owner,
-  repoName,
-  currentRepo,
-  result,
+  ctx,
   desiredValue,
-  dryRun,
   featureId,
   label,
   securityAnalysisKey,
   resultStem,
   onWarning
 }) {
+  const { octokit, owner, repoName, currentRepo, result, dryRun } = ctx;
   return handleBooleanFeatureToggle({
     result,
     desiredValue,
@@ -1081,37 +1076,6 @@ async function handleSecurityAnalysisToggle({
       }),
     onWarning
   });
-}
-
-function createRepoUpdater({
-  octokit,
-  owner,
-  repoName,
-  currentRepo,
-  result,
-  dryRun
-}) {
-  return {
-    handleBooleanEndpointToggle: options =>
-      handleBooleanEndpointToggle({
-        octokit,
-        owner,
-        repoName,
-        result,
-        dryRun,
-        ...options
-      }),
-    handleSecurityAnalysisToggle: options =>
-      handleSecurityAnalysisToggle({
-        octokit,
-        owner,
-        repoName,
-        currentRepo,
-        result,
-        dryRun,
-        ...options
-      })
-  };
 }
 
 /**
@@ -1447,14 +1411,14 @@ export async function updateRepositorySettings(
       dryRun
     };
 
-    const repoUpdater = createRepoUpdater({
+    const ctx = {
       octokit,
       owner,
       repoName,
       currentRepo,
       result,
       dryRun
-    });
+    };
 
     // Update repository settings (skip in dry-run mode)
     if (!dryRun && changes.length > 0) {
@@ -1592,7 +1556,8 @@ export async function updateRepositorySettings(
     }
 
     // Handle immutable releases
-    await repoUpdater.handleBooleanEndpointToggle({
+    await handleBooleanEndpointToggle({
+      ctx,
       desiredValue: immutableReleases,
       featureId: 'immutable-releases',
       label: 'immutable releases',
@@ -1608,7 +1573,8 @@ export async function updateRepositorySettings(
     // Handle security settings (only if securitySettings object is provided)
     if (securitySettings) {
       // Handle secret scanning settings
-      await repoUpdater.handleSecurityAnalysisToggle({
+      await handleSecurityAnalysisToggle({
+        ctx,
         desiredValue: securitySettings.secretScanning,
         featureId: 'secret-scanning',
         label: 'secret scanning',
@@ -1635,7 +1601,8 @@ export async function updateRepositorySettings(
       // Handle secret scanning push protection settings
       // Skip if we already set a cascade warning from secret scanning failure
       if (securitySettings.secretScanningPushProtection !== null && !result.secretScanningPushProtectionWarning) {
-        await repoUpdater.handleSecurityAnalysisToggle({
+        await handleSecurityAnalysisToggle({
+          ctx,
           desiredValue: securitySettings.secretScanningPushProtection,
           featureId: 'push-protection',
           label: 'secret scanning push protection',
@@ -1645,7 +1612,8 @@ export async function updateRepositorySettings(
       }
 
       // Handle private vulnerability reporting
-      await repoUpdater.handleBooleanEndpointToggle({
+      await handleBooleanEndpointToggle({
+        ctx,
         desiredValue: securitySettings.privateVulnerabilityReporting,
         featureId: 'private-vulnerability-reporting',
         label: 'private vulnerability reporting',
@@ -1658,7 +1626,8 @@ export async function updateRepositorySettings(
       });
 
       // Handle Dependabot alerts (vulnerability alerts)
-      await repoUpdater.handleBooleanEndpointToggle({
+      await handleBooleanEndpointToggle({
+        ctx,
         desiredValue: securitySettings.dependabotAlerts,
         featureId: 'dependabot-alerts',
         label: 'Dependabot alerts',
@@ -1672,7 +1641,8 @@ export async function updateRepositorySettings(
       });
 
       // Handle Dependabot security updates
-      await repoUpdater.handleBooleanEndpointToggle({
+      await handleBooleanEndpointToggle({
+        ctx,
         desiredValue: securitySettings.dependabotSecurityUpdates,
         featureId: 'dependabot-security-updates',
         label: 'Dependabot security updates',
