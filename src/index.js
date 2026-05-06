@@ -131,6 +131,22 @@ export function replaceTemplateVariables(content, vars) {
   return result;
 }
 
+function getValidSquashMergeCommitTitle(currentTitle, message) {
+  if (message === 'COMMIT_MESSAGES') {
+    return currentTitle === 'COMMIT_OR_PR_TITLE' ? currentTitle : 'PR_TITLE';
+  }
+
+  return 'PR_TITLE';
+}
+
+function getValidMergeCommitTitle(currentTitle, message) {
+  if (message === 'PR_TITLE') {
+    return currentTitle === 'MERGE_MESSAGE' ? currentTitle : 'PR_TITLE';
+  }
+
+  return 'PR_TITLE';
+}
+
 /**
  * File-path config keys that should be resolved against base-path.
  * @type {string[]}
@@ -924,13 +940,15 @@ const REPOSITORY_SETTING_FIELDS = Object.freeze([
   { key: 'squash_merge_commit_title' },
   {
     key: 'squash_merge_commit_message',
-    requiredCompanionField: 'squash_merge_commit_title'
+    requiredCompanionField: 'squash_merge_commit_title',
+    deriveCompanion: getValidSquashMergeCommitTitle
   },
   { key: 'allow_merge_commit' },
   { key: 'merge_commit_title' },
   {
     key: 'merge_commit_message',
-    requiredCompanionField: 'merge_commit_title'
+    requiredCompanionField: 'merge_commit_title',
+    deriveCompanion: getValidMergeCommitTitle
   },
   { key: 'allow_rebase_merge' },
   { key: 'allow_auto_merge' },
@@ -1354,7 +1372,7 @@ export async function updateRepositorySettings(
 
     for (const field of REPOSITORY_SETTING_FIELDS) {
       const desiredValue = settings[field.key];
-      if (desiredValue === null) {
+      if (desiredValue == null) {
         continue;
       }
 
@@ -1362,7 +1380,9 @@ export async function updateRepositorySettings(
       currentSettings[field.key] = currentRepo[field.key];
 
       if (field.requiredCompanionField && !updateParams[field.requiredCompanionField]) {
-        updateParams[field.requiredCompanionField] = currentRepo[field.requiredCompanionField];
+        updateParams[field.requiredCompanionField] = field.deriveCompanion
+          ? field.deriveCompanion(currentRepo[field.requiredCompanionField], desiredValue)
+          : currentRepo[field.requiredCompanionField];
       }
 
       if (currentRepo[field.key] !== desiredValue) {
@@ -4668,14 +4688,14 @@ export async function run() {
 
     // Check if any settings are specified
     // Skip this check if repositoriesFile is provided (rules-based configs define settings in file)
-    const hasSecuritySettings = Object.values(securitySettings).some(value => value !== null);
+    const hasSecuritySettings = Object.values(securitySettings).some(value => value != null);
     const hasSettings =
       repositoriesFile ||
-      Object.values(settings).some(value => value !== null) ||
-      enableCodeScanning !== null ||
-      immutableReleases !== null ||
+      Object.values(settings).some(value => value != null) ||
+      enableCodeScanning != null ||
+      immutableReleases != null ||
       hasSecuritySettings ||
-      topics !== null ||
+      topics != null ||
       dependabotYml ||
       gitignore ||
       rulesetsFiles.length > 0 ||
