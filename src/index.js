@@ -1053,7 +1053,7 @@ async function handleBooleanFeatureToggle({
  * @param {string} options.getRoute - REST route for reading the current state
  * @param {string} options.setRoute - REST path used for both enabling and disabling
  * @param {Function} options.readCurrentValue - Maps the GET response into a boolean
- * @param {number|boolean} [options.notFoundMeans] - Treat 404 from GET as this boolean current value
+ * @param {boolean} [options.notFoundMeans] - Treat 404 from GET as this boolean current value
  * @param {Object} [options.headers] - Optional request headers
  * @param {Function} [options.onWarning] - Optional callback invoked after warning state is set
  * @returns {Promise<void>}
