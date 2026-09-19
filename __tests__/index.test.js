@@ -60,6 +60,12 @@ const mockOctokit = {
     },
     git: {
       getRef: jest.fn(),
+      getCommit: jest.fn(),
+      getTree: jest.fn(),
+      getBlob: jest.fn(),
+      createBlob: jest.fn(),
+      createTree: jest.fn(),
+      createCommit: jest.fn(),
       createRef: jest.fn(),
       updateRef: jest.fn(),
       deleteRef: jest.fn()
@@ -93,7 +99,9 @@ const mockOctokit = {
 const mockFs = {
   readFileSync: jest.fn(),
   statSync: jest.fn(),
-  readdirSync: jest.fn()
+  readdirSync: jest.fn(),
+  lstatSync: jest.fn(),
+  readlinkSync: jest.fn()
 };
 
 // Mock yaml module - use a real implementation that tracks test content
@@ -2002,6 +2010,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
         false
       );
 
+      expect(result.error).toBeUndefined();
       expect(result.success).toBe(true);
       expect(result.repository).toBe('owner/repo');
       expect(result.changes.length).toBe(7);
@@ -8789,12 +8798,18 @@ describe('Bulk GitHub Repository Settings Action', () => {
     beforeEach(() => {
       mockOctokit.rest.repos.get.mockResolvedValue({ data: { default_branch: 'main' } });
       mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
-      mockOctokit.rest.git.getRef
-        .mockRejectedValueOnce({ status: 404 })
-        .mockResolvedValueOnce({ data: { object: { sha: 'abc123' } } });
+      mockOctokit.rest.git.getRef.mockImplementation(({ ref }) => {
+        if (ref === 'heads/main') return Promise.resolve({ data: { object: { sha: 'main-commit' } } });
+        const error = new Error('Not found');
+        error.status = 404;
+        return Promise.reject(error);
+      });
+      mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { tree: { sha: 'root-tree' } } });
+      mockOctokit.rest.git.getTree.mockResolvedValue({ data: { tree: [] } });
+      mockOctokit.rest.git.createBlob.mockResolvedValue({ data: { sha: 'new-blob' } });
+      mockOctokit.rest.git.createTree.mockResolvedValue({ data: { sha: 'new-tree' } });
+      mockOctokit.rest.git.createCommit.mockResolvedValue({ data: { sha: 'new-commit' } });
       mockOctokit.rest.git.createRef.mockResolvedValue({});
-      mockOctokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({});
-      mockOctokit.rest.repos.deleteFile.mockResolvedValue({});
       mockOctokit.rest.pulls.create.mockResolvedValue({
         data: { number: 42, html_url: 'https://github.com/owner/repo/pull/42' }
       });
@@ -8818,15 +8833,22 @@ describe('Bulk GitHub Repository Settings Action', () => {
       setMockFileContent('sync-config', '/config/sync.yml');
       setMockFileContent('{"extends": ["config:recommended"]}', '/config/renovate.json');
       setMockYamlContent({ files: [{ source: 'renovate.json', target: 'renovate.json' }] }, 'sync-config');
-      mockFs.statSync.mockReturnValue({ isDirectory: () => false, isFile: () => true });
-      mockOctokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
+      mockFs.lstatSync.mockReturnValue({
+        isDirectory: () => false,
+        isFile: () => true,
+        isSymbolicLink: () => false,
+        mode: 0o100644
+      });
 
       const result = await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
 
+      expect(result.error).toBeUndefined();
       expect(result.success).toBe(true);
       expect(result.files).toBe('created');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({ path: 'renovate.json', branch: 'files-sync' })
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: [expect.objectContaining({ path: 'renovate.json', mode: '100644', type: 'blob' })]
+        })
       );
     });
 
@@ -8837,33 +8859,78 @@ describe('Bulk GitHub Repository Settings Action', () => {
         { files: [{ source: 'templates', target: '.github', delete: true, ignore: ['keep/**'] }] },
         'sync-config'
       );
-      mockFs.statSync.mockImplementation(filePath => ({
+      mockFs.lstatSync.mockImplementation(filePath => ({
         isDirectory: () => filePath === '/config/templates',
-        isFile: () => filePath === '/config/templates/new.txt'
+        isFile: () => filePath === '/config/templates/new.txt',
+        isSymbolicLink: () => false,
+        mode: 0o100644
       }));
       mockFs.readdirSync.mockReturnValue([{ name: 'new.txt', isDirectory: () => false, isFile: () => true }]);
-      mockOctokit.rest.repos.getContent.mockImplementation(({ path: targetPath }) => {
-        if (targetPath === '.github') {
+      mockOctokit.rest.git.getTree.mockImplementation(({ tree_sha, recursive }) => {
+        if (tree_sha === 'root-tree')
+          return Promise.resolve({ data: { tree: [{ path: '.github', type: 'tree', sha: 'github-tree' }] } });
+        if (tree_sha === 'github-tree' && recursive) {
           return Promise.resolve({
-            data: [
-              { type: 'file', path: '.github/stale.txt', sha: 'stale-sha' },
-              { type: 'file', path: '.github/keep/keep.txt', sha: 'keep-sha' }
-            ]
+            data: {
+              tree: [
+                { path: 'stale.txt', type: 'blob', mode: '100644', sha: 'stale-sha' },
+                { path: 'keep/keep.txt', type: 'blob', mode: '100644', sha: 'keep-sha' }
+              ]
+            }
           });
         }
-        const error = new Error('Not found');
-        error.status = 404;
-        return Promise.reject(error);
+        if (tree_sha === 'github-tree') {
+          return Promise.resolve({
+            data: {
+              tree: [
+                { path: 'stale.txt', type: 'blob', mode: '100644', sha: 'stale-sha' },
+                { path: 'keep', type: 'tree', sha: 'keep-tree' }
+              ]
+            }
+          });
+        }
+        return Promise.resolve({ data: { tree: [] } });
       });
 
       const result = await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
 
       expect(result.success).toBe(true);
-      expect(mockOctokit.rest.repos.deleteFile).toHaveBeenCalledWith(
-        expect.objectContaining({ path: '.github/stale.txt', sha: 'stale-sha' })
+      const tree = mockOctokit.rest.git.createTree.mock.calls[0][0].tree;
+      expect(tree).toContainEqual(expect.objectContaining({ path: '.github/stale.txt', sha: null }));
+      expect(tree).not.toContainEqual(expect.objectContaining({ path: '.github/keep/keep.txt' }));
+    });
+
+    test('preserves executable mode and symlink targets', async () => {
+      setMockFileContent('sync-config', '/config/sync.yml');
+      setMockFileContent('#!/bin/sh\necho hello\n', '/config/script.sh');
+      setMockYamlContent(
+        {
+          files: [
+            { source: 'script.sh', target: 'script.sh' },
+            { source: 'script-link', target: 'script-link' }
+          ]
+        },
+        'sync-config'
       );
-      expect(mockOctokit.rest.repos.deleteFile).not.toHaveBeenCalledWith(
-        expect.objectContaining({ path: '.github/keep/keep.txt' })
+      mockFs.lstatSync.mockImplementation(filePath => ({
+        isDirectory: () => false,
+        isFile: () => filePath === '/config/script.sh',
+        isSymbolicLink: () => filePath === '/config/script-link',
+        mode: 0o100755
+      }));
+      mockFs.readlinkSync.mockReturnValue('script.sh');
+
+      const result = await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
+
+      expect(result.error).toBeUndefined();
+
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: [
+            expect.objectContaining({ path: 'script.sh', mode: '100755' }),
+            expect.objectContaining({ path: 'script-link', mode: '120000' })
+          ]
+        })
       );
     });
   });

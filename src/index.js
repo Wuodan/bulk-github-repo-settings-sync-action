@@ -276,7 +276,7 @@ function listLocalFiles(directoryPath, ignorePatterns, prefix = '') {
     const entryPath = path.join(directoryPath, entry.name);
     if (entry.isDirectory()) {
       files.push(...listLocalFiles(entryPath, ignorePatterns, relativePath));
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
       files.push({ sourceFilePath: entryPath, relativePath });
     }
   }
@@ -3561,24 +3561,72 @@ export async function syncWorkflowFiles(octokit, repo, workflowFilePaths, prTitl
   );
 }
 
-async function listRemoteFiles(octokit, owner, repo, targetPath, ref) {
-  try {
-    const { data } = await octokit.rest.repos.getContent({ owner, repo, path: targetPath, ref });
-    if (!Array.isArray(data)) return [{ targetPath: data.path, existingSha: data.sha }];
-
-    const files = [];
-    for (const entry of data) {
-      if (entry.type === 'dir') {
-        files.push(...(await listRemoteFiles(octokit, owner, repo, entry.path, ref)));
-      } else if (entry.type === 'file') {
-        files.push({ targetPath: entry.path, existingSha: entry.sha });
-      }
-    }
-    return files;
-  } catch (error) {
-    if (error.status === 404) return [];
-    throw error;
+function localGitEntry(sourceFilePath, targetPath) {
+  const stat = fs.lstatSync(sourceFilePath);
+  if (stat.isSymbolicLink()) {
+    return { sourceFilePath, targetPath, content: Buffer.from(fs.readlinkSync(sourceFilePath)), mode: '120000' };
   }
+  if (!stat.isFile()) throw new Error(`Unsupported source type for '${sourceFilePath}'`);
+  return {
+    sourceFilePath,
+    targetPath,
+    content: fs.readFileSync(sourceFilePath),
+    mode: stat.mode & 0o111 ? '100755' : '100644'
+  };
+}
+
+async function getCommitTree(octokit, owner, repo, ref) {
+  const { data: refData } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${ref}` });
+  const { data: commit } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: refData.object.sha });
+  return { commitSha: refData.object.sha, treeSha: commit.tree.sha };
+}
+
+async function getTreeEntry(octokit, owner, repo, rootTreeSha, targetPath) {
+  let treeSha = rootTreeSha;
+  const parts = targetPath.split('/').filter(Boolean);
+  for (let index = 0; index < parts.length; index++) {
+    const { data } = await octokit.rest.git.getTree({ owner, repo, tree_sha: treeSha });
+    const entry = data.tree.find(item => item.path === parts[index]);
+    if (!entry) return null;
+    if (index === parts.length - 1) return entry;
+    if (entry.type !== 'tree') return null;
+    treeSha = entry.sha;
+  }
+  return { type: 'tree', mode: '040000', sha: rootTreeSha };
+}
+
+async function listTreeFiles(octokit, owner, repo, rootTreeSha, targetPath) {
+  const entry = await getTreeEntry(octokit, owner, repo, rootTreeSha, targetPath);
+  if (!entry) return [];
+  if (entry.type === 'blob') return [{ targetPath, ...entry }];
+
+  const { data } = await octokit.rest.git.getTree({ owner, repo, tree_sha: entry.sha, recursive: 'true' });
+  if (data.truncated) throw new Error(`Target directory '${targetPath}' is too large to sync safely`);
+  return data.tree
+    .filter(item => item.type === 'blob')
+    .map(item => ({ targetPath: path.posix.join(targetPath, item.path), ...item }));
+}
+
+async function contentsEqual(octokit, owner, repo, existingEntry, desiredEntry) {
+  if (!existingEntry || existingEntry.mode !== desiredEntry.mode || existingEntry.type !== 'blob') return false;
+  const { data } = await octokit.rest.git.getBlob({ owner, repo, file_sha: existingEntry.sha });
+  return Buffer.from(data.content, 'base64').equals(desiredEntry.content);
+}
+
+function filesSyncResult(repo, status, message, files, createdFiles, updatedFiles, deletedFiles, dryRun, pr) {
+  return {
+    repository: repo,
+    success: true,
+    files: status,
+    message,
+    prNumber: pr?.number,
+    prUrl: pr?.html_url,
+    filesProcessed: files,
+    ...(createdFiles.length > 0 && { filesCreated: createdFiles }),
+    ...(updatedFiles.length > 0 && { filesUpdated: updatedFiles }),
+    ...(deletedFiles.length > 0 && { filesDeleted: deletedFiles }),
+    dryRun
+  };
 }
 
 /**
@@ -3599,32 +3647,45 @@ export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRu
 
     for (const mapping of mappings) {
       const sourcePath = path.resolve(configDirectory, mapping.source);
-      const stat = fs.statSync(sourcePath);
+      const stat = fs.lstatSync(sourcePath);
       if (stat.isDirectory()) {
         const localFiles = listLocalFiles(sourcePath, mapping.ignore);
         const targetFiles = new Set();
         for (const localFile of localFiles) {
           const targetPath = path.posix.join(mapping.target, localFile.relativePath);
           targetFiles.add(targetPath);
-          files.push({ sourceFilePath: localFile.sourceFilePath, targetPath });
+          files.push(localGitEntry(localFile.sourceFilePath, targetPath));
         }
         if (mapping.delete) {
           managedDirectories.push({ target: mapping.target, targetFiles, ignore: mapping.ignore });
         }
-      } else if (stat.isFile()) {
+      } else if (stat.isFile() || stat.isSymbolicLink()) {
         if (mapping.delete) {
           throw new Error(`'delete: true' is only valid for directory sources (${mapping.source})`);
         }
-        files.push({ sourceFilePath: sourcePath, targetPath: mapping.target });
+        files.push(localGitEntry(sourcePath, mapping.target));
       } else {
         throw new Error(`Unsupported source type for '${mapping.source}'`);
       }
     }
 
     const { data: repoData } = await octokit.rest.repos.get({ owner, repo: repoName });
+    const defaultState = await getCommitTree(octokit, owner, repoName, repoData.default_branch);
+
+    let existingPr = null;
+    const { data: pulls } = await octokit.rest.pulls.list({
+      owner,
+      repo: repoName,
+      state: 'open',
+      head: `${owner}:files-sync`
+    });
+    if (pulls.length > 0) existingPr = pulls[0];
+
+    const baseRef = existingPr ? 'files-sync' : repoData.default_branch;
+    const baseState = existingPr ? await getCommitTree(octokit, owner, repoName, baseRef) : defaultState;
     const filesToDelete = [];
     for (const directory of managedDirectories) {
-      const remoteFiles = await listRemoteFiles(octokit, owner, repoName, directory.target, repoData.default_branch);
+      const remoteFiles = await listTreeFiles(octokit, owner, repoName, baseState.treeSha, directory.target);
       for (const remoteFile of remoteFiles) {
         const relativePath = path.posix.relative(directory.target, remoteFile.targetPath);
         if (!directory.targetFiles.has(remoteFile.targetPath) && !isIgnored(relativePath, directory.ignore)) {
@@ -3633,21 +3694,144 @@ export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRu
       }
     }
 
-    return await syncFilesViaPullRequest(
-      octokit,
+    const changedFiles = [];
+    for (const file of files) {
+      const existing = await getTreeEntry(octokit, owner, repoName, baseState.treeSha, file.targetPath);
+      if (!(await contentsEqual(octokit, owner, repoName, existing, file))) {
+        changedFiles.push({ ...file, isNew: !existing });
+      }
+    }
+
+    const processedFiles = [...files.map(file => file.targetPath), ...filesToDelete.map(file => file.targetPath)];
+    if (changedFiles.length === 0 && filesToDelete.length === 0) {
+      const stalePrResult = await closeStaleActionPrs(octokit, repo, 'files-sync', dryRun, authenticatedLogin);
+      if (stalePrResult?.action === 'closed' || stalePrResult?.action === 'would-close') {
+        return filesSyncResult(
+          repo,
+          stalePrResult.action === 'closed' ? 'stale-pr-closed' : 'would-close-stale-pr',
+          stalePrResult.message,
+          processedFiles,
+          [],
+          [],
+          [],
+          dryRun,
+          { number: stalePrResult.prNumber, html_url: stalePrResult.prUrl }
+        );
+      }
+      const result = filesSyncResult(
+        repo,
+        'unchanged',
+        'All managed files are already up to date',
+        processedFiles,
+        [],
+        [],
+        [],
+        dryRun
+      );
+      if (stalePrResult?.action === 'warned') result.stalePrWarning = stalePrResult;
+      return result;
+    }
+
+    const createdFiles = changedFiles.filter(file => file.isNew).map(file => file.targetPath);
+    const updatedFiles = changedFiles.filter(file => !file.isNew).map(file => file.targetPath);
+    const deletedFiles = filesToDelete.map(file => file.targetPath);
+    const status =
+      createdFiles.length > 0 && updatedFiles.length > 0 ? 'mixed' : createdFiles.length > 0 ? 'created' : 'updated';
+    const action = existingPr ? 'update' : 'create';
+    if (dryRun) {
+      const dryStatus = existingPr ? 'would-update-pr' : createdFiles.length > 0 ? 'would-create' : 'would-update';
+      const result = filesSyncResult(
+        repo,
+        dryStatus,
+        `Would ${action} managed files via ${existingPr ? `PR #${existingPr.number}` : 'PR'}`,
+        processedFiles,
+        [],
+        [],
+        [],
+        true,
+        existingPr
+      );
+      if (createdFiles.length > 0) result.filesWouldCreate = createdFiles;
+      if (updatedFiles.length > 0) result.filesWouldUpdate = updatedFiles;
+      if (deletedFiles.length > 0) result.filesWouldDelete = deletedFiles;
+      return result;
+    }
+
+    const tree = [];
+    for (const file of changedFiles) {
+      const { data: blob } = await octokit.rest.git.createBlob({
+        owner,
+        repo: repoName,
+        content: file.content.toString('base64'),
+        encoding: 'base64'
+      });
+      tree.push({ path: file.targetPath, mode: file.mode, type: 'blob', sha: blob.sha });
+    }
+    for (const file of filesToDelete) {
+      tree.push({ path: file.targetPath, mode: file.mode, type: 'blob', sha: null });
+    }
+    const { data: newTree } = await octokit.rest.git.createTree({
+      owner,
+      repo: repoName,
+      base_tree: baseState.treeSha,
+      tree
+    });
+    const { data: commit } = await octokit.rest.git.createCommit({
+      owner,
+      repo: repoName,
+      message: 'chore: sync managed files',
+      tree: newTree.sha,
+      parents: [baseState.commitSha]
+    });
+
+    let pr = existingPr;
+    if (existingPr) {
+      await octokit.rest.git.updateRef({
+        owner,
+        repo: repoName,
+        ref: 'heads/files-sync',
+        sha: commit.sha,
+        force: false
+      });
+    } else {
+      try {
+        await octokit.rest.git.getRef({ owner, repo: repoName, ref: 'heads/files-sync' });
+        await octokit.rest.git.updateRef({
+          owner,
+          repo: repoName,
+          ref: 'heads/files-sync',
+          sha: commit.sha,
+          force: true
+        });
+      } catch (error) {
+        if (error.status !== 404) throw error;
+        await octokit.rest.git.createRef({ owner, repo: repoName, ref: 'refs/heads/files-sync', sha: commit.sha });
+      }
+      const { data } = await octokit.rest.pulls.create({
+        owner,
+        repo: repoName,
+        title: prTitle,
+        head: 'files-sync',
+        base: repoData.default_branch,
+        body: 'This PR syncs managed files to the latest versions.'
+      });
+      pr = data;
+    }
+
+    const finalStatus = existingPr
+      ? `pr-${status === 'created' ? 'updated-created' : status === 'mixed' ? 'updated-mixed' : 'updated'}`
+      : status;
+    const message = `${existingPr ? 'Updated' : 'Synced'} managed files via PR #${pr.number}`;
+    return filesSyncResult(
       repo,
-      {
-        files,
-        filesToDelete,
-        branchName: 'files-sync',
-        prTitle,
-        prBodyCreate: 'This PR syncs managed files.',
-        prBodyUpdate: 'This PR syncs managed files to the latest versions.',
-        resultKey: 'files',
-        fileDescription: 'managed files',
-        authenticatedLogin
-      },
-      dryRun
+      finalStatus,
+      message,
+      processedFiles,
+      createdFiles,
+      updatedFiles,
+      deletedFiles,
+      false,
+      pr
     );
   } catch (error) {
     return { repository: repo, success: false, error: `Failed to sync files: ${error.message}`, dryRun };
