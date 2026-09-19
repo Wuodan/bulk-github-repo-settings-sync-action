@@ -8900,6 +8900,44 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(tree).not.toContainEqual(expect.objectContaining({ path: '.github/keep/keep.txt' }));
     });
 
+    test('supports gitignore negation rules inside ignored directories', async () => {
+      setMockFileContent('sync-config', '/config/sync.yml');
+      setMockFileContent('keep', '/config/templates/ignored/keep.md');
+      setMockYamlContent(
+        {
+          files: [
+            {
+              source: 'templates',
+              target: '.github',
+              ignore: ['ignored/**', '!ignored/keep.md']
+            }
+          ]
+        },
+        'sync-config'
+      );
+      mockFs.lstatSync.mockImplementation(filePath => ({
+        isDirectory: () => filePath === '/config/templates',
+        isFile: () => filePath !== '/config/templates',
+        isSymbolicLink: () => false,
+        mode: 0o100644
+      }));
+      mockFs.readdirSync.mockImplementation(directoryPath => {
+        if (directoryPath === '/config/templates') {
+          return [{ name: 'ignored', isDirectory: () => true, isFile: () => false }];
+        }
+        return [
+          { name: 'keep.md', isDirectory: () => false, isFile: () => true },
+          { name: 'drop.md', isDirectory: () => false, isFile: () => true }
+        ];
+      });
+
+      await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
+
+      const tree = mockOctokit.rest.git.createTree.mock.calls[0][0].tree;
+      expect(tree).toContainEqual(expect.objectContaining({ path: '.github/ignored/keep.md' }));
+      expect(tree).not.toContainEqual(expect.objectContaining({ path: '.github/ignored/drop.md' }));
+    });
+
     test('preserves executable mode and symlink targets', async () => {
       setMockFileContent('sync-config', '/config/sync.yml');
       setMockFileContent('#!/bin/sh\necho hello\n', '/config/script.sh');

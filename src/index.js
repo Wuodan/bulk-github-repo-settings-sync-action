@@ -13,6 +13,7 @@
 import * as core from '@actions/core';
 import { Octokit } from '@octokit/rest';
 import * as fs from 'fs';
+import ignore from 'ignore';
 import * as path from 'path';
 import * as url from 'url';
 import * as yaml from 'js-yaml';
@@ -237,46 +238,21 @@ export function parseSyncFilesConfig(configPath) {
   });
 }
 
-function globToRegExp(glob) {
-  let expression = '';
-  for (let i = 0; i < glob.length; i++) {
-    const character = glob[i];
-    if (character === '*') {
-      if (glob[i + 1] === '*') {
-        i++;
-        if (glob[i + 1] === '/') {
-          i++;
-          expression += '(?:.*/)?';
-        } else {
-          expression += '.*';
-        }
-      } else {
-        expression += '[^/]*';
-      }
-    } else if (character === '?') {
-      expression += '[^/]';
-    } else {
-      expression += escapeRegExp(character);
-    }
-  }
-  return new RegExp(`^${expression}$`);
+function createIgnoreMatcher(patterns) {
+  const matcher = ignore().add(patterns);
+  return relativePath => matcher.ignores(relativePath.split(path.sep).join('/'));
 }
 
-function isIgnored(relativePath, ignorePatterns) {
-  const normalized = relativePath.split(path.sep).join('/');
-  return ignorePatterns.some(pattern => globToRegExp(pattern).test(normalized));
-}
-
-function listLocalFiles(directoryPath, ignorePatterns, prefix = '') {
+function listLocalFiles(directoryPath, isIgnored, prefix = '') {
   const entries = fs.readdirSync(directoryPath, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
     const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (isIgnored(relativePath, ignorePatterns)) continue;
     const entryPath = path.join(directoryPath, entry.name);
     if (entry.isDirectory()) {
-      files.push(...listLocalFiles(entryPath, ignorePatterns, relativePath));
-    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // Traverse ignored directories too: a later negated rule may re-include a child file.
+      files.push(...listLocalFiles(entryPath, isIgnored, relativePath));
+    } else if ((entry.isFile() || entry.isSymbolicLink()) && !isIgnored(relativePath)) {
       files.push({ sourceFilePath: entryPath, relativePath });
     }
   }
@@ -3649,7 +3625,8 @@ export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRu
       const sourcePath = path.resolve(configDirectory, mapping.source);
       const stat = fs.lstatSync(sourcePath);
       if (stat.isDirectory()) {
-        const localFiles = listLocalFiles(sourcePath, mapping.ignore);
+        const isIgnored = createIgnoreMatcher(mapping.ignore);
+        const localFiles = listLocalFiles(sourcePath, isIgnored);
         const targetFiles = new Set();
         for (const localFile of localFiles) {
           const targetPath = path.posix.join(mapping.target, localFile.relativePath);
@@ -3657,7 +3634,7 @@ export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRu
           files.push(localGitEntry(localFile.sourceFilePath, targetPath));
         }
         if (mapping.delete) {
-          managedDirectories.push({ target: mapping.target, targetFiles, ignore: mapping.ignore });
+          managedDirectories.push({ target: mapping.target, targetFiles, isIgnored });
         }
       } else if (stat.isFile() || stat.isSymbolicLink()) {
         if (mapping.delete) {
@@ -3688,7 +3665,7 @@ export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRu
       const remoteFiles = await listTreeFiles(octokit, owner, repoName, baseState.treeSha, directory.target);
       for (const remoteFile of remoteFiles) {
         const relativePath = path.posix.relative(directory.target, remoteFile.targetPath);
-        if (!directory.targetFiles.has(remoteFile.targetPath) && !isIgnored(relativePath, directory.ignore)) {
+        if (!directory.targetFiles.has(remoteFile.targetPath) && !directory.isIgnored(relativePath)) {
           filesToDelete.push(remoteFile);
         }
       }

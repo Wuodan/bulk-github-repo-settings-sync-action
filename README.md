@@ -533,7 +533,7 @@ files:
     sync-files-pr-title: 'chore: sync shared files'
 ```
 
-`delete: true` is valid for directory sources only. It removes target files not present in the source directory, recursively, in the same pull request. `ignore` accepts glob patterns relative to the mapped directory; ignored paths are neither copied nor deleted. Git file modes (including executable files) and symbolic links are preserved. A repository can override `sync-files-config` in `repos.yml` or `settings-config.yml`.
+`delete: true` is valid for directory sources only. It removes target files not present in the source directory, recursively, in the same pull request. `ignore` accepts `.gitignore`-style patterns relative to the mapped directory; ignored paths are neither copied nor deleted, and `!` rules can re-include paths. Git file modes (including executable files) and symbolic links are preserved. A repository can override `sync-files-config` in `repos.yml` or `settings-config.yml`.
 
 ### Syncing Autolink References
 
