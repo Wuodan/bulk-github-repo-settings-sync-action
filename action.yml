@@ -135,6 +135,13 @@ inputs:
     description: 'Title for pull requests when updating workflow files'
     required: false
     default: 'chore: sync workflow configuration'
+  sync-files-config:
+    description: 'Path to a YAML file defining arbitrary files or directories to sync to target repositories'
+    required: false
+  sync-files-pr-title:
+    description: 'Title for pull requests when syncing files from sync-files-config'
+    required: false
+    default: 'chore: sync files'
   autolinks-file:
     description: 'Path to a JSON file containing autolink references to sync to target repositories'
     required: false

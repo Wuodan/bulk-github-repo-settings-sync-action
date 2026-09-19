@@ -41,6 +41,7 @@ const mockOctokit = {
       getAllTopics: jest.fn(),
       getContent: jest.fn(),
       createOrUpdateFileContents: jest.fn(),
+      deleteFile: jest.fn(),
       getRepoRulesets: jest.fn(),
       getRepoRuleset: jest.fn(),
       createRepoRuleset: jest.fn(),
@@ -90,7 +91,9 @@ const mockOctokit = {
 
 // Mock fs module - use a real implementation that tracks test content
 const mockFs = {
-  readFileSync: jest.fn()
+  readFileSync: jest.fn(),
+  statSync: jest.fn(),
+  readdirSync: jest.fn()
 };
 
 // Mock yaml module - use a real implementation that tracks test content
@@ -250,6 +253,8 @@ const mockActionYmlParsed = {
     'pull-request-template-pr-title': { description: 'Pull request template PR title' },
     'workflow-files': { description: 'Workflow files' },
     'workflow-files-pr-title': { description: 'Workflow files PR title' },
+    'sync-files-config': { description: 'Sync files config' },
+    'sync-files-pr-title': { description: 'Sync files PR title' },
     'autolinks-file': { description: 'Autolinks file' },
     environments: { description: 'Comma-separated environment names' },
     'environments-file': { description: 'Environments file' },
@@ -347,6 +352,8 @@ const {
   stripRulesetReadonlyFields,
   syncPullRequestTemplate,
   syncWorkflowFiles,
+  syncManagedFiles,
+  parseSyncFilesConfig,
   syncAutolinks,
   syncEnvironments,
   parseEnvironmentsConfig,
@@ -3850,7 +3857,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       await run();
 
       expect(mockCore.setFailed).toHaveBeenCalledWith(
-        'Action failed with error: At least one repository setting must be specified (or code-scanning must be true, or immutable-releases must be specified, or security settings must be specified, or topics must be provided, or dependabot-yml must be specified, or gitignore must be specified, or rulesets-file must be specified, or pull-request-template must be specified, or workflow-files must be specified, or autolinks-file must be specified, or environments must be specified, or copilot-instructions-md must be specified, or codeowners must be specified, or package-json-file with package-json-sync-scripts or package-json-sync-engines must be specified)'
+        'Action failed with error: At least one repository setting must be specified (or code-scanning must be true, or immutable-releases must be specified, or security settings must be specified, or topics must be provided, or dependabot-yml must be specified, or gitignore must be specified, or rulesets-file must be specified, or pull-request-template must be specified, or workflow-files must be specified, or sync-files-config must be specified, or autolinks-file must be specified, or environments must be specified, or copilot-instructions-md must be specified, or codeowners must be specified, or package-json-file with package-json-sync-scripts or package-json-sync-engines must be specified)'
       );
     });
 
@@ -8775,6 +8782,89 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.filesCreated).toContain('.github/workflows/release.yml');
       expect(result.filesUpdated).toContain('.github/workflows/ci.yml');
       expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('generic file sync', () => {
+    beforeEach(() => {
+      mockOctokit.rest.repos.get.mockResolvedValue({ data: { default_branch: 'main' } });
+      mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
+      mockOctokit.rest.git.getRef
+        .mockRejectedValueOnce({ status: 404 })
+        .mockResolvedValueOnce({ data: { object: { sha: 'abc123' } } });
+      mockOctokit.rest.git.createRef.mockResolvedValue({});
+      mockOctokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({});
+      mockOctokit.rest.repos.deleteFile.mockResolvedValue({});
+      mockOctokit.rest.pulls.create.mockResolvedValue({
+        data: { number: 42, html_url: 'https://github.com/owner/repo/pull/42' }
+      });
+    });
+
+    test('parses file mappings and their directory options', () => {
+      setMockFileContent('sync-config', '/config/sync.yml');
+      setMockYamlContent(
+        {
+          files: [{ source: 'templates', target: '.github/', delete: true, ignore: ['keep/**'] }]
+        },
+        'sync-config'
+      );
+
+      expect(parseSyncFilesConfig('/config/sync.yml')).toEqual([
+        { source: 'templates', target: '.github', delete: true, ignore: ['keep/**'] }
+      ]);
+    });
+
+    test('syncs a file mapping in a pull request', async () => {
+      setMockFileContent('sync-config', '/config/sync.yml');
+      setMockFileContent('{"extends": ["config:recommended"]}', '/config/renovate.json');
+      setMockYamlContent({ files: [{ source: 'renovate.json', target: 'renovate.json' }] }, 'sync-config');
+      mockFs.statSync.mockReturnValue({ isDirectory: () => false, isFile: () => true });
+      mockOctokit.rest.repos.getContent.mockRejectedValue({ status: 404 });
+
+      const result = await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
+
+      expect(result.success).toBe(true);
+      expect(result.files).toBe('created');
+      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
+        expect.objectContaining({ path: 'renovate.json', branch: 'files-sync' })
+      );
+    });
+
+    test('deletes unmanaged directory files but preserves ignored files', async () => {
+      setMockFileContent('sync-config', '/config/sync.yml');
+      setMockFileContent('new content', '/config/templates/new.txt');
+      setMockYamlContent(
+        { files: [{ source: 'templates', target: '.github', delete: true, ignore: ['keep/**'] }] },
+        'sync-config'
+      );
+      mockFs.statSync.mockImplementation(filePath => ({
+        isDirectory: () => filePath === '/config/templates',
+        isFile: () => filePath === '/config/templates/new.txt'
+      }));
+      mockFs.readdirSync.mockReturnValue([{ name: 'new.txt', isDirectory: () => false, isFile: () => true }]);
+      mockOctokit.rest.repos.getContent.mockImplementation(({ path: targetPath }) => {
+        if (targetPath === '.github') {
+          return Promise.resolve({
+            data: [
+              { type: 'file', path: '.github/stale.txt', sha: 'stale-sha' },
+              { type: 'file', path: '.github/keep/keep.txt', sha: 'keep-sha' }
+            ]
+          });
+        }
+        const error = new Error('Not found');
+        error.status = 404;
+        return Promise.reject(error);
+      });
+
+      const result = await syncManagedFiles(mockOctokit, 'owner/repo', '/config/sync.yml', 'chore: sync files', false);
+
+      expect(result.success).toBe(true);
+      expect(mockOctokit.rest.repos.deleteFile).toHaveBeenCalledWith(
+        expect.objectContaining({ path: '.github/stale.txt', sha: 'stale-sha' })
+      );
+      expect(mockOctokit.rest.repos.deleteFile).not.toHaveBeenCalledWith(
+        expect.objectContaining({ path: '.github/keep/keep.txt' })
+      );
     });
   });
 

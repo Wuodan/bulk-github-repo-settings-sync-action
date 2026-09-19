@@ -156,6 +156,7 @@ const FILE_PATH_CONFIG_KEYS = [
   'dependabot-yml',
   'gitignore',
   'workflow-files',
+  'sync-files-config',
   'copilot-instructions-md',
   'codeowners',
   'package-json-file',
@@ -190,6 +191,96 @@ export function parseMultiValueInput(value) {
     .split(/[,\r\n]+/)
     .map(item => item.trim())
     .filter(item => item.length > 0);
+}
+
+/**
+ * Parse a generic file-sync YAML configuration.
+ *
+ * @param {string} configPath Path to a YAML file with a `files` array
+ * @returns {Array<{source: string, target: string, delete: boolean, ignore: string[]}>}
+ */
+export function parseSyncFilesConfig(configPath) {
+  let config;
+  try {
+    config = yaml.load(fs.readFileSync(configPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`Failed to read sync files config '${configPath}': ${error.message}`);
+  }
+
+  if (!config || !Array.isArray(config.files)) {
+    throw new Error(`Sync files config '${configPath}' must contain a 'files' array`);
+  }
+
+  return config.files.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Sync files config entry ${index + 1} must be an object`);
+    }
+    if (typeof entry.source !== 'string' || !entry.source.trim()) {
+      throw new Error(`Sync files config entry ${index + 1} requires a non-empty 'source' path`);
+    }
+    if (typeof entry.target !== 'string' || !entry.target.trim()) {
+      throw new Error(`Sync files config entry ${index + 1} requires a non-empty 'target' path`);
+    }
+    if (entry.delete !== undefined && typeof entry.delete !== 'boolean') {
+      throw new Error(`Sync files config entry ${index + 1} has an invalid 'delete' value; expected a boolean`);
+    }
+    if (entry.ignore !== undefined && (!Array.isArray(entry.ignore) || entry.ignore.some(p => typeof p !== 'string'))) {
+      throw new Error(`Sync files config entry ${index + 1} has an invalid 'ignore' value; expected an array of globs`);
+    }
+
+    return {
+      source: entry.source,
+      target: entry.target.replace(/^\/+/, '').replace(/\/+$/, ''),
+      delete: entry.delete === true,
+      ignore: entry.ignore || []
+    };
+  });
+}
+
+function globToRegExp(glob) {
+  let expression = '';
+  for (let i = 0; i < glob.length; i++) {
+    const character = glob[i];
+    if (character === '*') {
+      if (glob[i + 1] === '*') {
+        i++;
+        if (glob[i + 1] === '/') {
+          i++;
+          expression += '(?:.*/)?';
+        } else {
+          expression += '.*';
+        }
+      } else {
+        expression += '[^/]*';
+      }
+    } else if (character === '?') {
+      expression += '[^/]';
+    } else {
+      expression += escapeRegExp(character);
+    }
+  }
+  return new RegExp(`^${expression}$`);
+}
+
+function isIgnored(relativePath, ignorePatterns) {
+  const normalized = relativePath.split(path.sep).join('/');
+  return ignorePatterns.some(pattern => globToRegExp(pattern).test(normalized));
+}
+
+function listLocalFiles(directoryPath, ignorePatterns, prefix = '') {
+  const entries = fs.readdirSync(directoryPath, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (isIgnored(relativePath, ignorePatterns)) continue;
+    const entryPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listLocalFiles(entryPath, ignorePatterns, relativePath));
+    } else if (entry.isFile()) {
+      files.push({ sourceFilePath: entryPath, relativePath });
+    }
+  }
+  return files;
 }
 
 /**
@@ -1930,7 +2021,8 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
     fileDescription,
     contentProcessor,
     contentTransformer,
-    authenticatedLogin
+    authenticatedLogin,
+    filesToDelete = []
   } = options;
 
   const [owner, repoName] = repo.split('/');
@@ -2028,8 +2120,8 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
     }
 
     // If no files need updates, check for stale PRs and return
-    if (filesToUpdate.length === 0) {
-      const targetPaths = fileInfos.map(f => f.targetPath);
+    if (filesToUpdate.length === 0 && filesToDelete.length === 0) {
+      const targetPaths = [...fileInfos.map(f => f.targetPath), ...filesToDelete.map(f => f.targetPath)];
 
       // Check for stale open PRs that should be closed (source reverted to match target)
       const stalePrResult = await closeStaleActionPrs(octokit, repo, branchName, dryRun, authenticatedLogin);
@@ -2138,8 +2230,23 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         }
       }
 
+      const prBranchFilesToDelete = [];
+      for (const fileInfo of filesToDelete) {
+        try {
+          const { data } = await octokit.rest.repos.getContent({
+            owner,
+            repo: repoName,
+            path: fileInfo.targetPath,
+            ref: branchName
+          });
+          prBranchFilesToDelete.push({ ...fileInfo, existingSha: data.sha });
+        } catch (error) {
+          if (error.status !== 404) throw error;
+        }
+      }
+
       // If no files need updates in the PR branch, it's already up to date
-      if (prBranchFilesToUpdate.length === 0) {
+      if (prBranchFilesToUpdate.length === 0 && prBranchFilesToDelete.length === 0) {
         core.info(`  ✓ PR #${existingPR.number} already has the latest ${targetDesc}`);
         return {
           repository: repo,
@@ -2176,6 +2283,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           prUrl: existingPR.html_url,
           filesWouldCreate: newFiles.length > 0 ? newFiles : undefined,
           filesWouldUpdate: updatedFiles.length > 0 ? updatedFiles : undefined,
+          filesWouldDelete: prBranchFilesToDelete.map(f => f.targetPath),
           filesProcessed: fileInfos.map(f => f.targetPath),
           dryRun
         };
@@ -2208,6 +2316,20 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         core.info(`  ✍️  Committed changes to ${file.targetPath} in PR #${existingPR.number}`);
       }
 
+      const deletedFiles = [];
+      for (const file of prBranchFilesToDelete) {
+        await octokit.rest.repos.deleteFile({
+          owner,
+          repo: repoName,
+          path: file.targetPath,
+          message: `chore: delete ${file.targetPath}`,
+          branch: branchName,
+          sha: file.existingSha
+        });
+        deletedFiles.push(file.targetPath);
+        core.info(`  ✍️  Deleted ${file.targetPath} in PR #${existingPR.number}`);
+      }
+
       // Determine status
       let status;
       if (createdFiles.length > 0 && updatedFiles.length > 0) {
@@ -2237,6 +2359,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         message,
         filesCreated: createdFiles.length > 0 ? createdFiles : undefined,
         filesUpdated: updatedFiles.length > 0 ? updatedFiles : undefined,
+        filesDeleted: deletedFiles.length > 0 ? deletedFiles : undefined,
         filesProcessed: fileInfos.map(f => f.targetPath),
         dryRun
       };
@@ -2260,7 +2383,8 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         message,
         filesWouldCreate: newFiles.length > 0 ? newFiles : undefined,
         filesWouldUpdate: updatedFiles.length > 0 ? updatedFiles : undefined,
-        filesProcessed: fileInfos.map(f => f.targetPath),
+        filesWouldDelete: filesToDelete.map(f => f.targetPath),
+        filesProcessed: [...fileInfos.map(f => f.targetPath), ...filesToDelete.map(f => f.targetPath)],
         dryRun
       };
     }
@@ -2341,6 +2465,20 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       core.info(`  ✍️  Committed changes to ${file.targetPath}`);
     }
 
+    const deletedFiles = [];
+    for (const file of filesToDelete) {
+      await octokit.rest.repos.deleteFile({
+        owner,
+        repo: repoName,
+        path: file.targetPath,
+        message: `chore: delete ${file.targetPath}`,
+        branch: branchName,
+        sha: file.existingSha
+      });
+      deletedFiles.push(file.targetPath);
+      core.info(`  ✍️  Deleted ${file.targetPath}`);
+    }
+
     // Prepare PR body content - use dynamic body for multiple files, or simple body for single file
     let prBody;
     if (fileInfos.length === 1) {
@@ -2352,6 +2490,9 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       }
       if (updatedFiles.length > 0) {
         prBody += `\n**Updated:**\n${updatedFiles.map(f => `- \`${f}\``).join('\n')}\n`;
+      }
+      if (deletedFiles.length > 0) {
+        prBody += `\n**Deleted:**\n${deletedFiles.map(f => `- \`${f}\``).join('\n')}\n`;
       }
     }
 
@@ -2396,7 +2537,8 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       message,
       filesCreated: createdFiles.length > 0 ? createdFiles : undefined,
       filesUpdated: updatedFiles.length > 0 ? updatedFiles : undefined,
-      filesProcessed: fileInfos.map(f => f.targetPath),
+      filesDeleted: deletedFiles.length > 0 ? deletedFiles : undefined,
+      filesProcessed: [...fileInfos.map(f => f.targetPath), ...filesToDelete.map(f => f.targetPath)],
       dryRun
     };
   } catch (error) {
@@ -3417,6 +3559,99 @@ export async function syncWorkflowFiles(octokit, repo, workflowFilePaths, prTitl
     },
     dryRun
   );
+}
+
+async function listRemoteFiles(octokit, owner, repo, targetPath, ref) {
+  try {
+    const { data } = await octokit.rest.repos.getContent({ owner, repo, path: targetPath, ref });
+    if (!Array.isArray(data)) return [{ targetPath: data.path, existingSha: data.sha }];
+
+    const files = [];
+    for (const entry of data) {
+      if (entry.type === 'dir') {
+        files.push(...(await listRemoteFiles(octokit, owner, repo, entry.path, ref)));
+      } else if (entry.type === 'file') {
+        files.push({ targetPath: entry.path, existingSha: entry.sha });
+      }
+    }
+    return files;
+  } catch (error) {
+    if (error.status === 404) return [];
+    throw error;
+  }
+}
+
+/**
+ * Sync arbitrary files and directories described by a sync-files configuration.
+ * Directory entries with `delete: true` remove target files not present locally.
+ */
+export async function syncManagedFiles(octokit, repo, configPath, prTitle, dryRun, authenticatedLogin) {
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) {
+    return { repository: repo, success: false, error: 'Invalid repository format. Expected "owner/repo"', dryRun };
+  }
+
+  try {
+    const mappings = parseSyncFilesConfig(configPath);
+    const configDirectory = path.dirname(configPath);
+    const files = [];
+    const managedDirectories = [];
+
+    for (const mapping of mappings) {
+      const sourcePath = path.resolve(configDirectory, mapping.source);
+      const stat = fs.statSync(sourcePath);
+      if (stat.isDirectory()) {
+        const localFiles = listLocalFiles(sourcePath, mapping.ignore);
+        const targetFiles = new Set();
+        for (const localFile of localFiles) {
+          const targetPath = path.posix.join(mapping.target, localFile.relativePath);
+          targetFiles.add(targetPath);
+          files.push({ sourceFilePath: localFile.sourceFilePath, targetPath });
+        }
+        if (mapping.delete) {
+          managedDirectories.push({ target: mapping.target, targetFiles, ignore: mapping.ignore });
+        }
+      } else if (stat.isFile()) {
+        if (mapping.delete) {
+          throw new Error(`'delete: true' is only valid for directory sources (${mapping.source})`);
+        }
+        files.push({ sourceFilePath: sourcePath, targetPath: mapping.target });
+      } else {
+        throw new Error(`Unsupported source type for '${mapping.source}'`);
+      }
+    }
+
+    const { data: repoData } = await octokit.rest.repos.get({ owner, repo: repoName });
+    const filesToDelete = [];
+    for (const directory of managedDirectories) {
+      const remoteFiles = await listRemoteFiles(octokit, owner, repoName, directory.target, repoData.default_branch);
+      for (const remoteFile of remoteFiles) {
+        const relativePath = path.posix.relative(directory.target, remoteFile.targetPath);
+        if (!directory.targetFiles.has(remoteFile.targetPath) && !isIgnored(relativePath, directory.ignore)) {
+          filesToDelete.push(remoteFile);
+        }
+      }
+    }
+
+    return await syncFilesViaPullRequest(
+      octokit,
+      repo,
+      {
+        files,
+        filesToDelete,
+        branchName: 'files-sync',
+        prTitle,
+        prBodyCreate: 'This PR syncs managed files.',
+        prBodyUpdate: 'This PR syncs managed files to the latest versions.',
+        resultKey: 'files',
+        fileDescription: 'managed files',
+        authenticatedLogin
+      },
+      dryRun
+    );
+  } catch (error) {
+    return { repository: repo, success: false, error: `Failed to sync files: ${error.message}`, dryRun };
+  }
 }
 
 /**
@@ -4737,6 +4972,10 @@ export async function run() {
     const workflowFiles = workflowFilesInput ? parseMultiValueInput(workflowFilesInput) : null;
     const workflowFilesPrTitle = core.getInput('workflow-files-pr-title') || 'chore: sync workflow configuration';
 
+    // Get arbitrary file sync settings
+    const syncFilesConfig = core.getInput('sync-files-config');
+    const syncFilesPrTitle = core.getInput('sync-files-pr-title') || 'chore: sync files';
+
     // Get autolinks settings
     const autolinksFile = core.getInput('autolinks-file');
 
@@ -4794,6 +5033,7 @@ export async function run() {
       rulesetsFiles.length > 0 ||
       pullRequestTemplate ||
       (workflowFiles && workflowFiles.length > 0) ||
+      syncFilesConfig ||
       autolinksFile ||
       globalEnvironments.length > 0 ||
       copilotInstructionsMd ||
@@ -4801,7 +5041,7 @@ export async function run() {
       (packageJsonFile && (syncScripts || syncEngines));
     if (!hasSettings) {
       throw new Error(
-        'At least one repository setting must be specified (or code-scanning must be true, or immutable-releases must be specified, or security settings must be specified, or topics must be provided, or dependabot-yml must be specified, or gitignore must be specified, or rulesets-file must be specified, or pull-request-template must be specified, or workflow-files must be specified, or autolinks-file must be specified, or environments must be specified, or copilot-instructions-md must be specified, or codeowners must be specified, or package-json-file with package-json-sync-scripts or package-json-sync-engines must be specified)'
+        'At least one repository setting must be specified (or code-scanning must be true, or immutable-releases must be specified, or security settings must be specified, or topics must be provided, or dependabot-yml must be specified, or gitignore must be specified, or rulesets-file must be specified, or pull-request-template must be specified, or workflow-files must be specified, or sync-files-config must be specified, or autolinks-file must be specified, or environments must be specified, or copilot-instructions-md must be specified, or codeowners must be specified, or package-json-file with package-json-sync-scripts or package-json-sync-engines must be specified)'
       );
     }
 
@@ -4856,6 +5096,9 @@ export async function run() {
     }
     if (workflowFiles) {
       core.info(`Workflow files will be synced from: ${workflowFiles.join(', ')}`);
+    }
+    if (syncFilesConfig) {
+      core.info(`Managed files will be synced from: ${syncFilesConfig}`);
     }
     if (autolinksFile) {
       core.info(`Autolinks will be synced from: ${autolinksFile}`);
@@ -5041,6 +5284,9 @@ export async function run() {
         if (Array.isArray(repoConfig['workflow-files'])) return repoConfig['workflow-files'];
         return null;
       })();
+
+      const repoSyncFilesConfig =
+        repoConfig['sync-files-config'] !== undefined ? repoConfig['sync-files-config'] : syncFilesConfig;
 
       // Handle repo-specific autolinks-file
       const repoAutolinksFile =
@@ -5404,6 +5650,50 @@ export async function run() {
           core.warning(`  ⚠️  ${workflowResult.error}`);
           result.subResults.push(
             createSubResult('workflow-files-sync', SubResultStatus.WARNING, 'Workflow files sync produced a warning')
+          );
+        }
+      }
+
+      // Sync arbitrary files and directories if specified
+      if (repoSyncFilesConfig) {
+        core.info(`  📁 Checking managed files...`);
+        const filesResult = await syncManagedFiles(
+          octokit,
+          repo,
+          repoSyncFilesConfig,
+          syncFilesPrTitle,
+          dryRun,
+          authenticatedLogin
+        );
+        result.filesSync = filesResult;
+
+        if (filesResult.success) {
+          core.info(`  📁 ${filesResult.message}`);
+          if (filesResult.prUrl) core.info(`  🔗 PR URL: ${filesResult.prUrl}`);
+          if (filesResult.files && filesResult.files !== 'unchanged') {
+            result.subResults.push(
+              createSubResult('files-sync', statusForSync(filesResult.files), filesResult.message, {
+                syncStatus: filesResult.files,
+                prNumber: filesResult.prNumber,
+                prUrl: filesResult.prUrl
+              })
+            );
+          }
+          if (filesResult.stalePrWarning) {
+            result.hasWarnings = true;
+            result.subResults.push(
+              createSubResult('files-sync', SubResultStatus.WARNING, filesResult.stalePrWarning.message, {
+                prNumber: filesResult.stalePrWarning.prNumber,
+                prUrl: filesResult.stalePrWarning.prUrl
+              })
+            );
+          }
+        } else {
+          result.hasWarnings = true;
+          result.filesSyncWarning = filesResult.error;
+          core.warning(`  ⚠️  ${filesResult.error}`);
+          result.subResults.push(
+            createSubResult('files-sync', SubResultStatus.WARNING, 'File sync produced a warning')
           );
         }
       }

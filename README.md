@@ -34,6 +34,7 @@ Please refer to the [release page](https://github.com/joshjohanning/bulk-github-
 - 📋 **Sync repository rulesets** across repositories
 - 📝 **Sync pull request templates** across repositories via pull requests
 - 🔧 **Sync workflow files** across repositories via pull requests
+- 📁 **Sync arbitrary files and directories** across repositories via pull requests
 - 🔗 **Sync autolink references** across repositories
 - 🤖 **Sync copilot-instructions.md files** across repositories via pull requests
 - 👥 **Sync CODEOWNERS files** across repositories via pull requests
@@ -504,6 +505,35 @@ repos:
 - Workflow files are synced to `.github/workflows/<filename>` (preserving the original filename)
 
 For more information on GitHub Actions workflows, see the [GitHub Actions documentation](https://docs.github.com/en/actions/using-workflows).
+
+### Syncing Arbitrary Files and Directories
+
+Use `sync-files-config` to sync exact files or directory trees to target repositories in one pull request per repository. The configuration is YAML and is resolved relative to the configuration file.
+
+```yaml
+# config/file-sync.yml
+files:
+  - source: renovate.json
+    target: renovate.json
+
+  - source: community
+    target: .github
+    delete: true
+    ignore:
+      - keep/**
+```
+
+```yml
+- name: Sync managed files
+  uses: joshjohanning/bulk-github-repo-settings-sync-action@v2
+  with:
+    github-token: ${{ steps.app-token.outputs.token }}
+    repositories-file: repos.yml
+    sync-files-config: ./config/file-sync.yml
+    sync-files-pr-title: 'chore: sync shared files'
+```
+
+`delete: true` is valid for directory sources only. It removes target files not present in the source directory, recursively, in the same pull request. `ignore` accepts glob patterns relative to the mapped directory; ignored paths are neither copied nor deleted. A repository can override `sync-files-config` in `repos.yml` or `settings-config.yml`.
 
 ### Syncing Autolink References
 
