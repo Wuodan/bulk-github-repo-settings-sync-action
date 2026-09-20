@@ -62,5 +62,16 @@
     "globals": "^17.12.0",
     "jest": "^30.5.1",
     "prettier": "^3.9.6"
+  },
+  "overrides": {
+    "eslint-plugin-github": {
+      "@typescript-eslint/eslint-plugin": "^8.70.0",
+      "@typescript-eslint/parser": "^8.70.0",
+      "typescript-eslint": "^8.70.0"
+    }
+  },
+  "allowScripts": {
+    "@parcel/watcher@2.6.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }
