@@ -38,6 +38,7 @@ Please refer to the [release page](https://github.com/joshjohanning/bulk-github-
 - 🤖 **Sync copilot-instructions.md files** across repositories via pull requests
 - 👥 **Sync CODEOWNERS files** across repositories via pull requests
 - 📦 **Sync package.json properties** (scripts, engines) across repositories via pull requests
+- 📁 **Sync arbitrary files or directory templates** across repositories via pull requests
 - 📋 Support multiple repository input methods (comma-separated, YAML file, or all org repos)
 - 🎯 **Filter repositories by custom property values** for dynamic targeting
 - 🔍 **Dry-run mode** with change preview and intelligent change detection
@@ -114,7 +115,7 @@ repos:
 
 **Optional: `base-path`**
 
-Use the `base-path` top-level property to avoid repeating a common directory prefix for all file-path settings (e.g., `rulesets-file`, `dependabot-yml`, `gitignore`, `workflow-files`, `copilot-instructions-md`, `codeowners`, `package-json-file`, `pull-request-template`, `autolinks-file`). Relative paths in per-repo overrides are resolved relative to `base-path`. Absolute paths are left unchanged.
+Use the `base-path` top-level property to avoid repeating a common directory prefix for all file-path settings (e.g., `rulesets-file`, `dependabot-yml`, `gitignore`, `workflow-files`, `copilot-instructions-md`, `codeowners`, `package-json-file`, `pull-request-template`, `autolinks-file`, and `file-sync.source`). Relative paths in per-repo overrides are resolved relative to `base-path`. Absolute paths are left unchanged.
 
 ```yaml
 base-path: './settings-sync/repos/'
@@ -451,6 +452,34 @@ repos:
 - If an open PR already exists, updates the PR branch if the source content has changed
 
 For more information on pull request templates, see the [GitHub documentation](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository).
+
+### Syncing arbitrary files and directory templates
+
+Configure `file-sync` per repository in your `repositories-file` configuration (for example, `repos.yml`) to distribute files that do not have a dedicated sync option, such as `renovate.json`, `.npmrc`, or a shared directory tree. It creates or updates pull requests in the target repositories. Each mapping needs a descriptive `name`, a local `source`, and a destination-repository `target`. For a directory source, its contents are copied below `target`; use `target: .` for the repository root.
+
+```yaml
+base-path: './settings-sync'
+repos:
+  - repo: owner/repo1
+    file-sync:
+      - name: Renovate configuration
+        source: renovate/renovate.json
+        target: renovate.json
+      - name: Shared repository files
+        source: templates/base
+        target: .
+        delete: true
+        ignore:
+          - local/**
+          - '!local/README.md'
+```
+
+**Behavior:**
+
+- Mappings in the same optional `group` are included in one pull request. Mappings without a group use the `file-sync` group.
+- `delete: true` is valid only for directory sources and removes files below that mapping's target that are not in the source directory.
+- `ignore` uses `.gitignore` patterns, including negation rules. Ignored files are neither changed nor deleted.
+- Executable permissions and symbolic links are preserved.
 
 ### Syncing Workflow Files
 
