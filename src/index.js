@@ -2628,6 +2628,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           prUrl: protectedPr.html_url,
           filesProcessed: targetPaths,
           branchProtectionWarning: message,
+          stalePrWarning: { message, prNumber: protectedPr.number, prUrl: protectedPr.html_url },
           dryRun
         };
       }
@@ -2716,6 +2717,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           prUrl: existingPR.html_url,
           filesProcessed: fileInfos.map(f => f.targetPath),
           branchProtectionWarning: message,
+          stalePrWarning: { message, prNumber: existingPR.number, prUrl: existingPR.html_url },
           dryRun
         };
       }
