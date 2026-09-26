@@ -2094,7 +2094,11 @@ function buildFileSyncDesiredEntries(mappings) {
 async function getGitCommitAndTree(octokit, owner, repo, ref) {
   const { data: gitRef } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${ref}` });
   const { data: commit } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: gitRef.object.sha });
-  return { commitSha: gitRef.object.sha, treeSha: commit.tree.sha };
+  return {
+    commitSha: gitRef.object.sha,
+    treeSha: commit.tree.sha,
+    parentShas: (commit.parents || []).map(parent => parent.sha)
+  };
 }
 
 async function getGitRefIfExists(octokit, owner, repo, ref) {
@@ -2212,11 +2216,12 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     }
 
     const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
-    const base = existingBase || defaultBase;
-    const remoteFiles = existingPr ? await getGitTreeFiles(octokit, owner, repoName, base.treeSha) : defaultFiles;
-    const changes = existingPr ? changesFor(remoteFiles) : defaultChanges;
+    const remoteFiles = existingPr
+      ? await getGitTreeFiles(octokit, owner, repoName, existingBase.treeSha)
+      : defaultFiles;
+    const existingChanges = existingPr ? changesFor(remoteFiles) : defaultChanges;
 
-    if (changes.length === 0) {
+    if (existingPr && existingChanges.length === 0 && existingBase.parentShas.includes(defaultBase.commitSha)) {
       return {
         repository: repo,
         success: true,
@@ -2227,6 +2232,11 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
         dryRun
       };
     }
+
+    // Rebuild an existing PR from the current default-branch tree. This keeps its diff limited to the managed files
+    // after the default branch advances or has its history rewritten.
+    const base = defaultBase;
+    const changes = defaultChanges;
 
     let reusableBranchSha = null;
     if (!existingPr) {
@@ -2547,29 +2557,34 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       return result;
     }
 
-    // Check if there's already an open PR for this update
+    // Check if there's already an open PR for this update.
     let existingPR = null;
-    try {
+    if (authenticatedLogin) {
+      existingPR = await findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
+    } else {
       const { data: pulls } = await octokit.rest.pulls.list({
         owner,
         repo: repoName,
         state: 'open',
-        head: `${owner}:${branchName}`
+        head: `${owner}:${branchName}`,
+        per_page: 100
       });
-
-      if (pulls.length > 0) {
-        existingPR = pulls[0];
-        const targetDesc = fileInfos.length === 1 ? fileInfos[0].targetPath : fileDescription;
-        core.info(`  🔄 Found existing open PR #${existingPR.number} for ${targetDesc}`);
-      }
-    } catch (error) {
-      // Non-fatal, continue
-      core.warning(`  ⚠️  Could not check for existing PRs: ${error.message}`);
+      existingPR = pulls[0] || null;
+    }
+    if (existingPR) {
+      const targetDesc = fileInfos.length === 1 ? fileInfos[0].targetPath : fileDescription;
+      core.info(`  🔄 Found existing open PR #${existingPR.number} for ${targetDesc}`);
     }
 
     // If there's already an open PR, check if content differs and update if needed
     if (existingPR) {
       const targetDesc = fileInfos.length === 1 ? fileInfos[0].targetPath : fileDescription;
+      const defaultBase =
+        authenticatedLogin && existingPR.head?.sha
+          ? await getGitCommitAndTree(octokit, owner, repoName, defaultBranch)
+          : null;
+      const existingBase = defaultBase ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
+      const refreshBranch = existingBase && !existingBase.parentShas.includes(defaultBase.commitSha);
 
       // Fetch content from the PR branch to compare against source
       const prBranchFilesToUpdate = [];
@@ -2619,8 +2634,8 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         }
       }
 
-      // If no files need updates in the PR branch, it's already up to date
-      if (prBranchFilesToUpdate.length === 0) {
+      // If its managed files and base are current, the PR is already up to date.
+      if (prBranchFilesToUpdate.length === 0 && !refreshBranch) {
         core.info(`  ✓ PR #${existingPR.number} already has the latest ${targetDesc}`);
         return {
           repository: repo,
@@ -2634,19 +2649,21 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         };
       }
 
-      // PR exists but content differs - update the PR branch
-      core.info(`  🔄 PR #${existingPR.number} exists but content differs, will update`);
+      const branchFilesToUpdate = refreshBranch ? filesToUpdate : prBranchFilesToUpdate;
+      core.info(
+        `  🔄 PR #${existingPR.number} exists but ${refreshBranch ? 'its base is stale' : 'content differs'}, will update`
+      );
 
       if (dryRun) {
-        const newFiles = prBranchFilesToUpdate.filter(f => f.isNew).map(f => f.targetPath);
-        const updatedFiles = prBranchFilesToUpdate.filter(f => !f.isNew).map(f => f.targetPath);
+        const newFiles = branchFilesToUpdate.filter(f => f.isNew).map(f => f.targetPath);
+        const updatedFiles = branchFilesToUpdate.filter(f => !f.isNew).map(f => f.targetPath);
         let message;
         if (fileInfos.length === 1) {
-          message = prBranchFilesToUpdate[0].isNew
-            ? `Would create ${prBranchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`
-            : `Would update ${prBranchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`;
+          message = branchFilesToUpdate[0].isNew
+            ? `Would create ${branchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`
+            : `Would update ${branchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`;
         } else {
-          message = `Would update ${prBranchFilesToUpdate.length} file(s) in existing PR #${existingPR.number}`;
+          message = `Would update ${branchFilesToUpdate.length} file(s) in existing PR #${existingPR.number}`;
         }
         return {
           repository: repo,
@@ -2662,11 +2679,22 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         };
       }
 
-      // Commit updated files to the PR branch
+      if (refreshBranch) {
+        await updateActionBranchRef(
+          octokit,
+          repo,
+          branchName,
+          existingBase.commitSha,
+          defaultBase.commitSha,
+          'sync branch'
+        );
+      }
+
+      // Commit updated files to the PR branch.
       const createdFiles = [];
       const updatedFiles = [];
 
-      for (const file of prBranchFilesToUpdate) {
+      for (const file of branchFilesToUpdate) {
         const commitMessage = file.isNew ? `chore: add ${file.targetPath}` : `chore: update ${file.targetPath}`;
         const contentToCommit = file.finalContent || file.content;
 
@@ -2677,7 +2705,9 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           message: commitMessage,
           content: Buffer.from(contentToCommit).toString('base64'),
           branch: branchName,
-          sha: file.existingSha || undefined
+          sha: refreshBranch
+            ? filesToUpdate.find(defaultFile => defaultFile.targetPath === file.targetPath).existingSha
+            : file.existingSha || undefined
         });
 
         if (file.isNew) {
@@ -2702,11 +2732,11 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       // Build message
       let message;
       if (fileInfos.length === 1) {
-        message = prBranchFilesToUpdate[0].isNew
-          ? `Created ${prBranchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`
-          : `Updated ${prBranchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`;
+        message = branchFilesToUpdate[0].isNew
+          ? `Created ${branchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`
+          : `Updated ${branchFilesToUpdate[0].targetPath} in existing PR #${existingPR.number}`;
       } else {
-        message = `Updated ${prBranchFilesToUpdate.length} file(s) in existing PR #${existingPR.number}`;
+        message = `Updated ${branchFilesToUpdate.length} file(s) in existing PR #${existingPR.number}`;
       }
 
       return {
