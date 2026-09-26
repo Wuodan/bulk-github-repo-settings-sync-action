@@ -1894,6 +1894,29 @@ export async function closeStaleActionPrs(octokit, repo, branchName, dryRun, aut
   }
 }
 
+/** Find the open PR on a sync branch and verify that this action owns it. */
+export async function findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin) {
+  const [owner, repoName] = repo.split('/');
+  const { data: pulls } = await octokit.rest.pulls.list({
+    owner,
+    repo: repoName,
+    state: 'open',
+    head: `${owner}:${branchName}`,
+    per_page: 100
+  });
+  if (pulls.length === 0) return null;
+  if (!authenticatedLogin) {
+    throw new Error(`Cannot verify ownership of existing PR #${pulls[0].number} on branch '${branchName}'`);
+  }
+  const unexpectedPr = pulls.find(pr => pr.user?.login !== authenticatedLogin || pr.base?.ref !== defaultBranch);
+  if (unexpectedPr) {
+    throw new Error(
+      `Refusing to update branch '${branchName}' because PR #${unexpectedPr.number} is owned by '${unexpectedPr.user?.login || 'unknown'}' and targets '${unexpectedPr.base?.ref || 'unknown'}', expected '${authenticatedLogin}' and '${defaultBranch}'`
+    );
+  }
+  return pulls[0];
+}
+
 const DEFAULT_FILE_SYNC_GROUP = 'file-sync';
 
 function normalizeRepositoryPath(target, fieldName = 'target') {
@@ -2082,6 +2105,18 @@ async function getGitRefIfExists(octokit, owner, repo, ref) {
     if (error.status === 404) return null;
     throw error;
   }
+}
+
+/** Force-update an action-owned branch only if it still has the expected tip. */
+export async function updateActionBranchRef(octokit, repo, branchName, expectedSha, sha, branchLabel = 'branch') {
+  const [owner, repoName] = repo.split('/');
+  const currentBranch = await getGitRefIfExists(octokit, owner, repoName, branchName);
+  if (currentBranch?.object.sha !== expectedSha) {
+    throw new Error(
+      `Refusing to overwrite ${branchLabel} '${branchName}' because it changed after the ownership check`
+    );
+  }
+  await octokit.rest.git.updateRef({ owner, repo: repoName, ref: `heads/${branchName}`, sha, force: true });
 }
 
 async function getGitTreeFiles(octokit, owner, repo, treeSha) {

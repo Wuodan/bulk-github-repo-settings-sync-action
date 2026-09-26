@@ -373,6 +373,8 @@ const {
   syncCodeowners,
   syncPackageJson,
   closeStaleActionPrs,
+  findOwnedOpenSyncPr,
+  updateActionBranchRef,
   escapeHtmlAttribute,
   formatPrLink,
   resetKnownRepoConfigKeysCache,
@@ -1210,6 +1212,49 @@ describe('Bulk GitHub Repository Settings Action', () => {
         name: 'Renovate',
         source: 'base/templates/renovate.json',
         target: '.github/renovate.json'
+      });
+    });
+  });
+
+  describe('sync PR ownership helpers', () => {
+    test('finds an owned open sync PR on the default branch', async () => {
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 19, user: { login: 'bot' }, base: { ref: 'main' } }]
+      });
+
+      const result = await findOwnedOpenSyncPr(mockOctokit, 'owner/repo', 'file-sync', 'main', 'bot');
+
+      expect(result).toMatchObject({ number: 19 });
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        state: 'open',
+        head: 'owner:file-sync',
+        per_page: 100
+      });
+    });
+
+    test('refuses an open sync PR not owned by the authenticated account', async () => {
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 19, user: { login: 'someone-else' }, base: { ref: 'main' } }]
+      });
+
+      await expect(findOwnedOpenSyncPr(mockOctokit, 'owner/repo', 'file-sync', 'main', 'bot')).rejects.toThrow(
+        `Refusing to update branch 'file-sync'`
+      );
+    });
+
+    test('force-updates a branch only when its tip remains unchanged', async () => {
+      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'expected' } } });
+
+      await updateActionBranchRef(mockOctokit, 'owner/repo', 'file-sync', 'expected', 'replacement');
+
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        ref: 'heads/file-sync',
+        sha: 'replacement',
+        force: true
       });
     });
   });
