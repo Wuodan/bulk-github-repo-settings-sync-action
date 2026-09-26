@@ -2114,6 +2114,13 @@ async function isCommitAncestor(octokit, owner, repo, ancestorSha, descendantSha
   return data.status === 'ahead' || data.status === 'identical';
 }
 
+async function findNonActionBranchCommit(octokit, owner, repo, baseSha, headSha, authenticatedLogin) {
+  const { data } = await octokit.rest.repos.compareCommits({ owner, repo, base: baseSha, head: headSha });
+  return (data.commits || []).find(
+    commit => commit.author?.login !== authenticatedLogin && commit.committer?.login !== authenticatedLogin
+  );
+}
+
 async function getGitRefIfExists(octokit, owner, repo, ref) {
   try {
     const { data } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${ref}` });
@@ -2229,6 +2236,30 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     }
 
     const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
+    const nonActionCommit =
+      existingPr &&
+      (await findNonActionBranchCommit(
+        octokit,
+        owner,
+        repoName,
+        defaultBase.commitSha,
+        existingBase.commitSha,
+        authenticatedLogin
+      ));
+    if (nonActionCommit) {
+      const message = `PR #${existingPr.number} has a commit not made by ${authenticatedLogin}; skipping branch rebuild.`;
+      core.warning(`  ⚠️  ${message}`);
+      return {
+        repository: repo,
+        success: true,
+        fileSync: 'pr-up-to-date',
+        message,
+        prNumber: existingPr.number,
+        prUrl: existingPr.html_url,
+        branchProtectionWarning: message,
+        dryRun
+      };
+    }
     const remoteFiles = existingPr
       ? await getGitTreeFiles(octokit, owner, repoName, existingBase.treeSha)
       : defaultFiles;
@@ -2608,6 +2639,31 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           ? await getGitCommitAndTree(octokit, owner, repoName, defaultBranch)
           : null;
       const existingBase = defaultBase ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
+      const nonActionCommit =
+        existingBase &&
+        (await findNonActionBranchCommit(
+          octokit,
+          owner,
+          repoName,
+          defaultBase.commitSha,
+          existingBase.commitSha,
+          authenticatedLogin
+        ));
+      if (nonActionCommit) {
+        const message = `PR #${existingPR.number} has a commit not made by ${authenticatedLogin}; skipping branch rebuild.`;
+        core.warning(`  ⚠️  ${message}`);
+        return {
+          repository: repo,
+          success: true,
+          [resultKey]: 'pr-up-to-date',
+          message,
+          prNumber: existingPR.number,
+          prUrl: existingPR.html_url,
+          filesProcessed: fileInfos.map(f => f.targetPath),
+          branchProtectionWarning: message,
+          dryRun
+        };
+      }
       const refreshBranch =
         existingBase &&
         !(await isCommitAncestor(
