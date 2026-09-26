@@ -1894,6 +1894,29 @@ export async function closeStaleActionPrs(octokit, repo, branchName, dryRun, aut
   }
 }
 
+/** Find the open PR on a sync branch and verify that this action owns it. */
+export async function findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin) {
+  const [owner, repoName] = repo.split('/');
+  const { data: pulls } = await octokit.rest.pulls.list({
+    owner,
+    repo: repoName,
+    state: 'open',
+    head: `${owner}:${branchName}`,
+    per_page: 100
+  });
+  if (pulls.length === 0) return null;
+  if (!authenticatedLogin) {
+    throw new Error(`Cannot verify ownership of existing PR #${pulls[0].number} on branch '${branchName}'`);
+  }
+  const unexpectedPr = pulls.find(pr => pr.user?.login !== authenticatedLogin || pr.base?.ref !== defaultBranch);
+  if (unexpectedPr) {
+    throw new Error(
+      `Refusing to update branch '${branchName}' because PR #${unexpectedPr.number} is owned by '${unexpectedPr.user?.login || 'unknown'}' and targets '${unexpectedPr.base?.ref || 'unknown'}', expected '${authenticatedLogin}' and '${defaultBranch}'`
+    );
+  }
+  return pulls[0];
+}
+
 const DEFAULT_FILE_SYNC_GROUP = 'file-sync';
 
 function normalizeRepositoryPath(target, fieldName = 'target') {
@@ -2084,6 +2107,47 @@ async function getGitRefIfExists(octokit, owner, repo, ref) {
   }
 }
 
+async function createFileSyncCommit(octokit, owner, repo, base, files, message) {
+  const tree = [];
+  for (const file of files) {
+    const content = Buffer.from(file.finalContent || file.content);
+    const { data: blob } = await octokit.rest.git.createBlob({
+      owner,
+      repo,
+      content: content.toString('base64'),
+      encoding: 'base64'
+    });
+    tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha: blob.sha });
+  }
+  const { data: newTree } = await octokit.rest.git.createTree({
+    owner,
+    repo,
+    base_tree: base.treeSha,
+    tree
+  });
+  return (
+    await octokit.rest.git.createCommit({
+      owner,
+      repo,
+      message,
+      tree: newTree.sha,
+      parents: [base.commitSha]
+    })
+  ).data;
+}
+
+/** Force-update an action-owned branch only if it still has the expected tip. */
+export async function updateActionBranchRef(octokit, repo, branchName, expectedSha, sha, branchLabel = 'branch') {
+  const [owner, repoName] = repo.split('/');
+  const currentBranch = await getGitRefIfExists(octokit, owner, repoName, branchName);
+  if (currentBranch?.object.sha !== expectedSha) {
+    throw new Error(
+      `Refusing to overwrite ${branchLabel} '${branchName}' because it changed after the ownership check`
+    );
+  }
+  await octokit.rest.git.updateRef({ owner, repo: repoName, ref: `heads/${branchName}`, sha, force: true });
+}
+
 async function getGitTreeFiles(octokit, owner, repo, treeSha) {
   const { data } = await octokit.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: 'true' });
   if (data.truncated) throw new Error('Target repository tree is too large to safely sync files');
@@ -2131,23 +2195,6 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     const desired = buildFileSyncDesiredEntries(mappings);
     const { data: repoData } = await octokit.rest.repos.get({ owner, repo: repoName });
     const defaultBranch = repoData.default_branch;
-    const { data: pulls } = await octokit.rest.pulls.list({
-      owner,
-      repo: repoName,
-      state: 'open',
-      head: `${owner}:${branchName}`,
-      per_page: 100
-    });
-    if (pulls.length > 0 && !authenticatedLogin) {
-      throw new Error(`Cannot verify ownership of existing PR #${pulls[0].number} on branch '${branchName}'`);
-    }
-    const unexpectedPr = pulls.find(pr => pr.user?.login !== authenticatedLogin || pr.base?.ref !== defaultBranch);
-    if (unexpectedPr) {
-      throw new Error(
-        `Refusing to update branch '${branchName}' because PR #${unexpectedPr.number} is owned by '${unexpectedPr.user?.login || 'unknown'}' and targets '${unexpectedPr.base?.ref || 'unknown'}', expected '${authenticatedLogin}' and '${defaultBranch}'`
-      );
-    }
-    const existingPr = pulls[0];
     const changesFor = remoteFiles => {
       const changes = [];
       for (const [targetPath, entry] of desired) {
@@ -2182,17 +2229,15 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       return {
         repository: repo,
         success: true,
-        fileSync: existingPr ? 'pr-up-to-date' : 'unchanged',
-        message: existingPr
-          ? `File sync group '${group}' is already up to date in PR #${existingPr.number}`
-          : `File sync group '${group}' is already up to date`,
-        prNumber: existingPr?.number,
-        prUrl: existingPr?.html_url,
+        fileSync: 'unchanged',
+        message: `File sync group '${group}' is already up to date`,
         dryRun
       };
     }
 
-    const base = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : defaultBase;
+    const existingPr = await findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
+    const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
+    const base = existingBase || defaultBase;
     const remoteFiles = existingPr ? await getGitTreeFiles(octokit, owner, repoName, base.treeSha) : defaultFiles;
     const changes = existingPr ? changesFor(remoteFiles) : defaultChanges;
 
@@ -2284,13 +2329,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       parents: [base.commitSha]
     });
     if (existingPr) {
-      await octokit.rest.git.updateRef({
-        owner,
-        repo: repoName,
-        ref: `heads/${branchName}`,
-        sha: commit.sha,
-        force: false
-      });
+      await updateActionBranchRef(octokit, repo, branchName, existingBase.commitSha, commit.sha, 'file-sync branch');
       return {
         repository: repo,
         success: true,
@@ -2302,19 +2341,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       };
     }
     if (reusableBranchSha) {
-      const currentBranch = await getGitRefIfExists(octokit, owner, repoName, branchName);
-      if (currentBranch?.object.sha !== reusableBranchSha) {
-        throw new Error(
-          `Refusing to overwrite file-sync branch '${branchName}' because it changed after the ownership check`
-        );
-      }
-      await octokit.rest.git.updateRef({
-        owner,
-        repo: repoName,
-        ref: `heads/${branchName}`,
-        sha: commit.sha,
-        force: true
-      });
+      await updateActionBranchRef(octokit, repo, branchName, reusableBranchSha, commit.sha, 'file-sync branch');
     } else {
       try {
         await octokit.rest.git.createRef({ owner, repo: repoName, ref: `refs/heads/${branchName}`, sha: commit.sha });
@@ -2660,30 +2687,12 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         };
       }
 
-      // Commit updated files to the PR branch
-      const createdFiles = [];
-      const updatedFiles = [];
-
+      const createdFiles = prBranchFilesToUpdate.filter(file => file.isNew).map(file => file.targetPath);
+      const updatedFiles = prBranchFilesToUpdate.filter(file => !file.isNew).map(file => file.targetPath);
+      const branchBase = await getGitCommitAndTree(octokit, owner, repoName, branchName);
+      const commit = await createFileSyncCommit(octokit, owner, repoName, branchBase, prBranchFilesToUpdate, prTitle);
+      await updateActionBranchRef(octokit, repo, branchName, branchBase.commitSha, commit.sha, 'sync branch');
       for (const file of prBranchFilesToUpdate) {
-        const commitMessage = file.isNew ? `chore: add ${file.targetPath}` : `chore: update ${file.targetPath}`;
-        const contentToCommit = file.finalContent || file.content;
-
-        await octokit.rest.repos.createOrUpdateFileContents({
-          owner,
-          repo: repoName,
-          path: file.targetPath,
-          message: commitMessage,
-          content: Buffer.from(contentToCommit).toString('base64'),
-          branch: branchName,
-          sha: file.existingSha || undefined
-        });
-
-        if (file.isNew) {
-          createdFiles.push(file.targetPath);
-        } else {
-          updatedFiles.push(file.targetPath);
-        }
-
         core.info(`  ✍️  Committed changes to ${file.targetPath} in PR #${existingPR.number}`);
       }
 
@@ -2763,60 +2772,31 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       }
     }
 
-    // Get the SHA of the default branch to create new branch from
-    const { data: defaultRef } = await octokit.rest.git.getRef({
-      owner,
-      repo: repoName,
-      ref: `heads/${defaultBranch}`
-    });
+    const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
+    const createdFiles = filesToUpdate.filter(file => file.isNew).map(file => file.targetPath);
+    const updatedFiles = filesToUpdate.filter(file => !file.isNew).map(file => file.targetPath);
+    const commit = await createFileSyncCommit(octokit, owner, repoName, defaultBase, filesToUpdate, prTitle);
 
     if (!branchExists) {
-      // Create new branch
       await octokit.rest.git.createRef({
         owner,
         repo: repoName,
         ref: `refs/heads/${branchName}`,
-        sha: defaultRef.object.sha
+        sha: commit.sha
       });
       core.info(`  🌿 Created branch ${branchName}`);
     } else {
-      // Update existing branch to latest from default branch
       await octokit.rest.git.updateRef({
         owner,
         repo: repoName,
         ref: `heads/${branchName}`,
-        sha: defaultRef.object.sha,
+        sha: commit.sha,
         force: true
       });
       core.info(`  🌿 Updated branch ${branchName}`);
     }
 
-    // Create or update each file
-    const createdFiles = [];
-    const updatedFiles = [];
-
     for (const file of filesToUpdate) {
-      const commitMessage = file.isNew ? `chore: add ${file.targetPath}` : `chore: update ${file.targetPath}`;
-
-      // Use finalContent if available (from contentProcessor), otherwise use original content
-      const contentToCommit = file.finalContent || file.content;
-
-      await octokit.rest.repos.createOrUpdateFileContents({
-        owner,
-        repo: repoName,
-        path: file.targetPath,
-        message: commitMessage,
-        content: Buffer.from(contentToCommit).toString('base64'),
-        branch: branchName,
-        sha: file.existingSha || undefined
-      });
-
-      if (file.isNew) {
-        createdFiles.push(file.targetPath);
-      } else {
-        updatedFiles.push(file.targetPath);
-      }
-
       core.info(`  ✍️  Committed changes to ${file.targetPath}`);
     }
 

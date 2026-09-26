@@ -95,6 +95,21 @@ const mockOctokit = {
   graphql: jest.fn()
 };
 
+function expectGitDataFileCommit(...paths) {
+  expect(mockOctokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
+  expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+    expect.objectContaining({
+      tree: expect.arrayContaining(paths.map(path => expect.objectContaining({ path, mode: '100644', type: 'blob' })))
+    })
+  );
+  expect(mockOctokit.rest.git.createCommit).toHaveBeenCalledTimes(1);
+}
+
+function getCommittedBlobContent(index = 0) {
+  const { content } = mockOctokit.rest.git.createBlob.mock.calls[index][0];
+  return Buffer.from(content, 'base64').toString('utf8');
+}
+
 // Mock fs module - use a real implementation that tracks test content
 const mockFs = {
   readFileSync: jest.fn(),
@@ -373,6 +388,8 @@ const {
   syncCodeowners,
   syncPackageJson,
   closeStaleActionPrs,
+  findOwnedOpenSyncPr,
+  updateActionBranchRef,
   escapeHtmlAttribute,
   formatPrLink,
   resetKnownRepoConfigKeysCache,
@@ -1210,6 +1227,49 @@ describe('Bulk GitHub Repository Settings Action', () => {
         name: 'Renovate',
         source: 'base/templates/renovate.json',
         target: '.github/renovate.json'
+      });
+    });
+  });
+
+  describe('sync PR ownership helpers', () => {
+    test('finds an owned open sync PR on the default branch', async () => {
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 19, user: { login: 'bot' }, base: { ref: 'main' } }]
+      });
+
+      const result = await findOwnedOpenSyncPr(mockOctokit, 'owner/repo', 'file-sync', 'main', 'bot');
+
+      expect(result).toMatchObject({ number: 19 });
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        state: 'open',
+        head: 'owner:file-sync',
+        per_page: 100
+      });
+    });
+
+    test('refuses an open sync PR not owned by the authenticated account', async () => {
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 19, user: { login: 'someone-else' }, base: { ref: 'main' } }]
+      });
+
+      await expect(findOwnedOpenSyncPr(mockOctokit, 'owner/repo', 'file-sync', 'main', 'bot')).rejects.toThrow(
+        `Refusing to update branch 'file-sync'`
+      );
+    });
+
+    test('force-updates a branch only when its tip remains unchanged', async () => {
+      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'expected' } } });
+
+      await updateActionBranchRef(mockOctokit, 'owner/repo', 'file-sync', 'expected', 'replacement');
+
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        ref: 'heads/file-sync',
+        sha: 'replacement',
+        force: true
       });
     });
   });
@@ -5874,7 +5934,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
+      expectGitDataFileCommit('.github/workflows/ci.yml', '.github/workflows/release.yml');
     });
 
     test('should process repo-specific workflow-files as array', async () => {
@@ -6464,14 +6524,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.dependabotYml).toBe('created');
       expect(result.prNumber).toBe(42);
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.github/dependabot.yml',
-          branch: 'dependabot-yml-sync'
-        })
-      );
+      expectGitDataFileCommit('.github/dependabot.yml');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -6527,11 +6580,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.success).toBe(true);
       expect(result.dependabotYml).toBe('updated');
       expect(result.prNumber).toBe(43);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sha: 'file-sha-456'
-        })
-      );
+      expectGitDataFileCommit('.github/dependabot.yml');
     });
 
     test('should not create PR when content is unchanged', async () => {
@@ -6632,10 +6681,10 @@ describe('Bulk GitHub Repository Settings Action', () => {
         owner: 'owner',
         repo: 'repo',
         ref: 'heads/dependabot-yml-sync',
-        sha: 'main-sha-456',
+        sha: 'new-commit',
         force: true
       });
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalled();
+      expectGitDataFileCommit('.github/dependabot.yml');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -6697,12 +6746,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prUrl).toBe('https://github.com/owner/repo/pull/50');
       expect(result.message).toContain('Updated');
       expect(result.message).toContain('PR #50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'dependabot-yml-sync',
-          sha: 'file-sha-pr-branch'
-        })
-      );
+      expectGitDataFileCommit('.github/dependabot.yml');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -6805,12 +6849,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prNumber).toBe(50);
       expect(result.message).toContain('Created');
       expect(result.message).toContain('PR #50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'dependabot-yml-sync',
-          sha: undefined
-        })
-      );
+      expectGitDataFileCommit('.github/dependabot.yml');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -8153,14 +8192,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.pullRequestTemplate).toBe('created');
       expect(result.prNumber).toBe(42);
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.github/pull_request_template.md',
-          branch: 'pull-request-template-sync'
-        })
-      );
+      expectGitDataFileCommit('.github/pull_request_template.md');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -8215,11 +8247,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.success).toBe(true);
       expect(result.pullRequestTemplate).toBe('updated');
       expect(result.prNumber).toBe(43);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sha: 'file-sha-456'
-        })
-      );
+      expectGitDataFileCommit('.github/pull_request_template.md');
     });
 
     test('should not create PR when content is unchanged', async () => {
@@ -8317,10 +8345,10 @@ describe('Bulk GitHub Repository Settings Action', () => {
         owner: 'owner',
         repo: 'repo',
         ref: 'heads/pull-request-template-sync',
-        sha: 'main-sha-456',
+        sha: 'new-commit',
         force: true
       });
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalled();
+      expectGitDataFileCommit('.github/pull_request_template.md');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -8377,12 +8405,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.pullRequestTemplate).toBe('pr-updated');
       expect(result.prNumber).toBe(50);
       expect(result.prUrl).toBe('https://github.com/owner/repo/pull/50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'pull-request-template-sync',
-          sha: 'file-sha-pr-branch'
-        })
-      );
+      expectGitDataFileCommit('.github/pull_request_template.md');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -8590,14 +8613,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prNumber).toBe(42);
       expect(result.filesCreated).toContain('.github/workflows/ci.yml');
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.github/workflows/ci.yml',
-          branch: 'workflow-files-sync'
-        })
-      );
+      expectGitDataFileCommit('.github/workflows/ci.yml');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -8652,11 +8668,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.workflowFiles).toBe('updated');
       expect(result.prNumber).toBe(43);
       expect(result.filesUpdated).toContain('.github/workflows/ci.yml');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sha: 'file-sha-456'
-        })
-      );
+      expectGitDataFileCommit('.github/workflows/ci.yml');
     });
 
     test('should handle multiple workflow files', async () => {
@@ -8704,7 +8716,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prNumber).toBe(44);
       expect(result.filesCreated).toContain('.github/workflows/ci.yml');
       expect(result.filesCreated).toContain('.github/workflows/release.yml');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
+      expectGitDataFileCommit('.github/workflows/ci.yml', '.github/workflows/release.yml');
     });
 
     test('should not create PR when all files are unchanged', async () => {
@@ -8788,7 +8800,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
         owner: 'owner',
         repo: 'repo',
         ref: 'heads/workflow-files-sync',
-        sha: 'main-sha-456',
+        sha: 'new-commit',
         force: true
       });
     });
@@ -8844,12 +8856,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.workflowFiles).toBe('pr-updated');
       expect(result.prNumber).toBe(50);
       expect(result.prUrl).toBe('https://github.com/owner/repo/pull/50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'workflow-files-sync',
-          sha: 'file-sha-pr-branch'
-        })
-      );
+      expectGitDataFileCommit('.github/workflows/ci.yml');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -8913,7 +8920,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prNumber).toBe(50);
       expect(result.filesCreated).toContain('.github/workflows/release.yml');
       expect(result.filesUpdated).toContain('.github/workflows/ci.yml');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
+      expectGitDataFileCommit('.github/workflows/ci.yml', '.github/workflows/release.yml');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -9245,7 +9252,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.prNumber).toBe(46);
       expect(result.filesCreated).toContain('.github/workflows/release.yml');
       expect(result.filesUpdated).toContain('.github/workflows/ci.yml');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledTimes(2);
+      expectGitDataFileCommit('.github/workflows/ci.yml', '.github/workflows/release.yml');
     });
   });
 
@@ -10545,14 +10552,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.gitignore).toBe('created');
       expect(result.prNumber).toBe(42);
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.gitignore',
-          branch: 'gitignore-sync'
-        })
-      );
+      expectGitDataFileCommit('.gitignore');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -10593,9 +10593,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.success).toBe(true);
       expect(result.gitignore).toBe('updated');
       expect(result.prNumber).toBe(43);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({ sha: 'file-sha-456' })
-      );
+      expectGitDataFileCommit('.gitignore');
     });
 
     test('should preserve repo-specific content after marker', async () => {
@@ -10636,14 +10634,9 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       expect(result.success).toBe(true);
       // Verify repo-specific content is preserved
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          content: expect.any(String)
-        })
-      );
+      expectGitDataFileCommit('.gitignore');
       // Decode and verify the content includes the repo-specific marker
-      const call = mockOctokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
-      const content = Buffer.from(call.content, 'base64').toString('utf8');
+      const content = getCommittedBlobContent();
       expect(content).toContain(marker);
       expect(content).toContain('*.custom');
     });
@@ -10714,12 +10707,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.gitignore).toBe('pr-updated');
       expect(result.prNumber).toBe(50);
       expect(result.prUrl).toBe('https://github.com/owner/repo/pull/50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'gitignore-sync',
-          sha: 'file-sha-pr-branch'
-        })
-      );
+      expectGitDataFileCommit('.gitignore');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -10902,14 +10890,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.copilotInstructions).toBe('created');
       expect(result.prNumber).toBe(42);
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.github/copilot-instructions.md',
-          branch: 'copilot-instructions-md-sync'
-        })
-      );
+      expectGitDataFileCommit('.github/copilot-instructions.md');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -10963,11 +10944,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.success).toBe(true);
       expect(result.copilotInstructions).toBe('updated');
       expect(result.prNumber).toBe(43);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sha: 'file-sha-456'
-        })
-      );
+      expectGitDataFileCommit('.github/copilot-instructions.md');
     });
 
     test('should not create PR when content is unchanged', async () => {
@@ -11057,12 +11034,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.copilotInstructions).toBe('pr-updated');
       expect(result.prNumber).toBe(50);
       expect(result.prUrl).toBe('https://github.com/owner/repo/pull/50');
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          branch: 'copilot-instructions-md-sync',
-          sha: 'file-sha-pr-branch'
-        })
-      );
+      expectGitDataFileCommit('.github/copilot-instructions.md');
       expect(mockOctokit.rest.pulls.create).not.toHaveBeenCalled();
     });
 
@@ -11271,14 +11243,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.codeowners).toBe('created');
       expect(result.prNumber).toBe(42);
       expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          path: '.github/CODEOWNERS',
-          branch: 'codeowners-sync'
-        })
-      );
+      expectGitDataFileCommit('.github/CODEOWNERS');
       expect(mockOctokit.rest.pulls.create).toHaveBeenCalled();
     });
 
@@ -11412,11 +11377,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
-        expect.objectContaining({
-          path: 'CODEOWNERS'
-        })
-      );
+      expectGitDataFileCommit('CODEOWNERS');
     });
 
     test('should reject invalid target path', async () => {
@@ -11563,8 +11524,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(result.success).toBe(true);
 
       // Verify the content was transformed
-      const createFileCall = mockOctokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
-      const committedContent = Buffer.from(createFileCall.content, 'base64').toString('utf8');
+      const committedContent = getCommittedBlobContent();
       expect(committedContent).toContain('@org/team-a');
       expect(committedContent).toContain('@org/leads');
       expect(committedContent).not.toContain('{{default_team}}');
@@ -11605,8 +11565,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       expect(result.success).toBe(true);
 
-      const createFileCall = mockOctokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
-      const committedContent = Buffer.from(createFileCall.content, 'base64').toString('utf8');
+      const committedContent = getCommittedBlobContent();
       expect(committedContent).toContain('@org/team-a');
       expect(committedContent).toContain('@org/leads');
     });
@@ -11644,8 +11603,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
 
       expect(result.success).toBe(true);
 
-      const createFileCall = mockOctokit.rest.repos.createOrUpdateFileContents.mock.calls[0][0];
-      const committedContent = Buffer.from(createFileCall.content, 'base64').toString('utf8');
+      const committedContent = getCommittedBlobContent();
       expect(committedContent).toContain('@org/team-a');
       expect(committedContent).toContain('@org/leads');
     });
