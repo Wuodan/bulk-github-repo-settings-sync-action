@@ -2121,6 +2121,29 @@ async function findNonActionBranchCommit(octokit, owner, repo, baseSha, headSha,
   );
 }
 
+async function findProtectedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin) {
+  if (!authenticatedLogin) return null;
+  const [owner, repoName] = repo.split('/');
+  try {
+    const existingPr = await findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
+    if (!existingPr?.head?.sha) return null;
+    const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
+    const existingBase = await getGitCommitAndTree(octokit, owner, repoName, branchName);
+    const commit = await findNonActionBranchCommit(
+      octokit,
+      owner,
+      repoName,
+      defaultBase.commitSha,
+      existingBase.commitSha,
+      authenticatedLogin
+    );
+    return commit ? existingPr : null;
+  } catch (error) {
+    core.warning(`  ⚠️  Could not inspect PR branch history: ${error.message}`);
+    return null;
+  }
+}
+
 async function getGitRefIfExists(octokit, owner, repo, ref) {
   try {
     const { data } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${ref}` });
@@ -2210,6 +2233,21 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     const defaultChanges = changesFor(defaultFiles);
 
     if (defaultChanges.length === 0) {
+      const protectedPr = await findProtectedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
+      if (protectedPr) {
+        const message = `PR #${protectedPr.number} has a commit not made by ${authenticatedLogin}; skipping auto-close.`;
+        core.warning(`  ⚠️  ${message}`);
+        return {
+          repository: repo,
+          success: true,
+          fileSync: 'pr-up-to-date',
+          message,
+          prNumber: protectedPr.number,
+          prUrl: protectedPr.html_url,
+          branchProtectionWarning: message,
+          dryRun
+        };
+      }
       const stale = await closeStaleActionPrs(octokit, repo, branchName, dryRun, authenticatedLogin);
       if (stale?.action === 'closed' || stale?.action === 'would-close') {
         return {
@@ -2576,6 +2614,23 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
     // If no files need updates, check for stale PRs and return
     if (filesToUpdate.length === 0) {
       const targetPaths = fileInfos.map(f => f.targetPath);
+
+      const protectedPr = await findProtectedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
+      if (protectedPr) {
+        const message = `PR #${protectedPr.number} has a commit not made by ${authenticatedLogin}; skipping auto-close.`;
+        core.warning(`  ⚠️  ${message}`);
+        return {
+          repository: repo,
+          success: true,
+          [resultKey]: 'pr-up-to-date',
+          message,
+          prNumber: protectedPr.number,
+          prUrl: protectedPr.html_url,
+          filesProcessed: targetPaths,
+          branchProtectionWarning: message,
+          dryRun
+        };
+      }
 
       // Check for stale open PRs that should be closed (source reverted to match target)
       const stalePrResult = await closeStaleActionPrs(octokit, repo, branchName, dryRun, authenticatedLogin);
