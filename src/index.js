@@ -2101,6 +2101,19 @@ async function getGitCommitAndTree(octokit, owner, repo, ref) {
   };
 }
 
+/** Return whether ancestorSha is reachable from descendantSha. */
+async function isCommitAncestor(octokit, owner, repo, ancestorSha, descendantSha, descendantParentShas = []) {
+  if (ancestorSha === descendantSha || descendantParentShas.includes(ancestorSha)) return true;
+
+  const { data } = await octokit.rest.repos.compareCommits({
+    owner,
+    repo,
+    base: ancestorSha,
+    head: descendantSha
+  });
+  return data.status === 'ahead' || data.status === 'identical';
+}
+
 async function getGitRefIfExists(octokit, owner, repo, ref) {
   try {
     const { data } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${ref}` });
@@ -2221,7 +2234,18 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       : defaultFiles;
     const existingChanges = existingPr ? changesFor(remoteFiles) : defaultChanges;
 
-    if (existingPr && existingChanges.length === 0 && existingBase.parentShas.includes(defaultBase.commitSha)) {
+    const defaultIsAncestorOfExisting =
+      existingPr &&
+      (await isCommitAncestor(
+        octokit,
+        owner,
+        repoName,
+        defaultBase.commitSha,
+        existingBase.commitSha,
+        existingBase.parentShas
+      ));
+
+    if (existingPr && existingChanges.length === 0 && defaultIsAncestorOfExisting) {
       return {
         repository: repo,
         success: true,
@@ -2584,7 +2608,16 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           ? await getGitCommitAndTree(octokit, owner, repoName, defaultBranch)
           : null;
       const existingBase = defaultBase ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
-      const refreshBranch = existingBase && !existingBase.parentShas.includes(defaultBase.commitSha);
+      const refreshBranch =
+        existingBase &&
+        !(await isCommitAncestor(
+          octokit,
+          owner,
+          repoName,
+          defaultBase.commitSha,
+          existingBase.commitSha,
+          existingBase.parentShas
+        ));
 
       // Fetch content from the PR branch to compare against source
       const prBranchFilesToUpdate = [];
