@@ -24,11 +24,19 @@ So the refreshed branch contains the new target commit and the new sync commit; 
 
 ## Changes
 
+### Fix stale sync PR branches
+
 - Refresh action-owned sync PRs from the current default branch when that tip is not an ancestor of the PR branch.
 - Rebuild the managed-file diff on the current default tree, so unrelated changes from the old target history do not remain in the PR.
 - Treat a default tip that is any ancestor of the PR branch as current. This avoids unnecessary refreshes for multi-commit sync PRs.
+
+### Protect externally modified PR branches
+
 - Follow Dependabot's safety model for externally changed bot branches: if the PR-only history contains a commit not made by the action account, do not refresh or auto-close the PR.
 - Report these externally modified PR branches as warnings, while leaving the branch and PR open for review.
+
+### Internal cleanup
+
 - Share sync-PR ownership and lifecycle checks across file-sync and single-file sync paths.
 
 ## Validation and related work
