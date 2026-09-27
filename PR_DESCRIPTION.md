@@ -2,7 +2,7 @@
 
 ## Problem
 
-Open sync PRs could be based on an outdated default branch after the target branch moves forward.
+Open Dependabot-config and `file-sync` PRs could be based on an outdated default branch after the target branch moves forward.
 
 Previously, an already-current managed file could cause the action to treat the PR as up to date even when its branch was no longer based on the current default tip. The PR then kept an outdated diff and could be blocked from merging.
 
