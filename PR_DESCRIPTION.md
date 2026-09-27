@@ -6,6 +6,22 @@ Open sync PRs could be based on an outdated default branch after the target bran
 
 Previously, an already-current managed file could cause the action to treat the PR as up to date even when its branch was no longer based on the current default tip. The PR then kept an outdated diff and could be blocked from merging.
 
+After a target commit (`B`) was added, the old PR branch still looked like this:
+
+```
+main:        A -- B
+sync branch: A -- S
+```
+
+Refreshing now moves the sync branch onto `B` and creates a new sync commit (`S'`):
+
+```
+main:        A -- B
+sync branch:      B -- S'
+```
+
+So the refreshed branch contains the new target commit and the new sync commit; the PR diff against the current target remains limited to `S'`.
+
 ## Changes
 
 - Refresh action-owned sync PRs from the current default branch when that tip is not an ancestor of the PR branch.
