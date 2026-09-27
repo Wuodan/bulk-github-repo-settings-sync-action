@@ -41,6 +41,7 @@ const mockOctokit = {
       replaceAllTopics: jest.fn(),
       getAllTopics: jest.fn(),
       getContent: jest.fn(),
+      getCommit: jest.fn(),
       compareCommits: jest.fn(),
       createOrUpdateFileContents: jest.fn(),
       getRepoRulesets: jest.fn(),
@@ -417,6 +418,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
     mockOctokit.rest.repos.listForOrg.mockReset();
     mockOctokit.rest.repos.replaceAllTopics.mockClear();
     mockOctokit.rest.repos.getContent.mockClear();
+    mockOctokit.rest.repos.getCommit.mockReset();
     mockOctokit.rest.repos.compareCommits.mockResolvedValue({ data: { status: 'behind' } });
     mockOctokit.rest.repos.createOrUpdateFileContents.mockClear();
     mockOctokit.rest.repos.getRepoRulesets.mockClear();
@@ -6956,6 +6958,20 @@ describe('Bulk GitHub Repository Settings Action', () => {
           }
         })
       );
+      // After a target-history rewrite, former target commits are unique to the
+      // PR branch. The bot-created sync commit is still the branch tip.
+      mockOctokit.rest.repos.compareCommits.mockResolvedValue({
+        data: {
+          status: 'diverged',
+          commits: [
+            { sha: 'former-target-commit', author: { login: 'human' }, committer: { login: 'human' } },
+            { sha: 'pr-commit', author: { login: 'bot' }, committer: { login: 'bot' } }
+          ]
+        }
+      });
+      mockOctokit.rest.repos.getCommit.mockResolvedValue({
+        data: { author: { login: 'bot' }, committer: { login: 'bot' } }
+      });
       mockOctokit.rest.repos.createOrUpdateFileContents.mockResolvedValue({ data: { commit: { sha: 'new-commit' } } });
 
       const result = await syncDependabotYml(
@@ -6978,6 +6994,70 @@ describe('Bulk GitHub Repository Settings Action', () => {
       expect(mockOctokit.rest.repos.createOrUpdateFileContents).toHaveBeenCalledWith(
         expect.objectContaining({ branch: 'dependabot-yml-sync', sha: 'default-file-sha' })
       );
+      expect(mockOctokit.rest.repos.getCommit).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        ref: 'pr-commit'
+      });
+    });
+
+    test('does not rebuild a stale PR branch when a human appended its tip commit', async () => {
+      const newContent = 'version: 2\nupdates: []';
+      const oldContent = 'version: 2\nupdates: [old]';
+
+      setMockFileContent(newContent);
+      mockOctokit.rest.repos.get.mockResolvedValue({ data: { default_branch: 'main' } });
+      mockOctokit.rest.repos.getContent.mockResolvedValue({
+        data: { sha: 'default-file-sha', content: Buffer.from(oldContent).toString('base64') }
+      });
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [
+          {
+            number: 50,
+            html_url: 'https://github.com/owner/repo/pull/50',
+            user: { login: 'bot' },
+            base: { ref: 'main' },
+            head: { sha: 'human-commit' }
+          }
+        ]
+      });
+      mockOctokit.rest.git.getRef.mockImplementation(({ ref }) =>
+        Promise.resolve({ data: { object: { sha: ref === 'heads/main' ? 'default-commit' : 'human-commit' } } })
+      );
+      mockOctokit.rest.git.getCommit.mockImplementation(({ commit_sha }) =>
+        Promise.resolve({
+          data: {
+            tree: { sha: `${commit_sha}-tree` },
+            parents: commit_sha === 'default-commit' ? [] : [{ sha: 'pr-commit' }]
+          }
+        })
+      );
+      mockOctokit.rest.repos.compareCommits.mockResolvedValue({
+        data: {
+          status: 'diverged',
+          commits: [
+            { sha: 'pr-commit', author: { login: 'bot' }, committer: { login: 'bot' } },
+            { sha: 'human-commit', author: { login: 'human' }, committer: { login: 'human' } }
+          ]
+        }
+      });
+      mockOctokit.rest.repos.getCommit.mockResolvedValue({
+        data: { author: { login: 'human' }, committer: { login: 'human' } }
+      });
+
+      const result = await syncDependabotYml(
+        mockOctokit,
+        'owner/repo',
+        './dependabot.yml',
+        'chore: update dependabot.yml',
+        false,
+        'bot'
+      );
+
+      expect(result).toMatchObject({ success: true, dependabotYml: 'pr-up-to-date', prNumber: 50 });
+      expect(result.branchProtectionWarning).toContain('has a commit not made by bot');
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createOrUpdateFileContents).not.toHaveBeenCalled();
     });
 
     test('should create file in PR branch when file does not exist in PR branch', async () => {

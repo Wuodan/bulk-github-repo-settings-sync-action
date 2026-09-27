@@ -2114,11 +2114,15 @@ async function isCommitAncestor(octokit, owner, repo, ancestorSha, descendantSha
   return data.status === 'ahead' || data.status === 'identical';
 }
 
-async function findNonActionBranchCommit(octokit, owner, repo, baseSha, headSha, authenticatedLogin) {
-  const { data } = await octokit.rest.repos.compareCommits({ owner, repo, base: baseSha, head: headSha });
-  return (data.commits || []).find(
-    commit => commit.author?.login !== authenticatedLogin && commit.committer?.login !== authenticatedLogin
-  );
+async function findNonActionBranchCommit(octokit, owner, repo, headSha, authenticatedLogin) {
+  // A target-branch history rewrite makes commits that were formerly inherited
+  // from the target appear as branch-only commits. Inspect the branch tip
+  // directly: only a non-action tip can show that somebody appended a commit.
+  const response = await octokit.rest.repos.getCommit({ owner, repo, ref: headSha });
+  const commit = response?.data;
+  return commit && commit.author?.login !== authenticatedLogin && commit.committer?.login !== authenticatedLogin
+    ? commit
+    : null;
 }
 
 async function findProtectedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin) {
@@ -2127,13 +2131,11 @@ async function findProtectedOpenSyncPr(octokit, repo, branchName, defaultBranch,
   try {
     const existingPr = await findOwnedOpenSyncPr(octokit, repo, branchName, defaultBranch, authenticatedLogin);
     if (!existingPr?.head?.sha) return null;
-    const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
     const existingBase = await getGitCommitAndTree(octokit, owner, repoName, branchName);
     const commit = await findNonActionBranchCommit(
       octokit,
       owner,
       repoName,
-      defaultBase.commitSha,
       existingBase.commitSha,
       authenticatedLogin
     );
@@ -2276,14 +2278,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
     const nonActionCommit =
       existingPr &&
-      (await findNonActionBranchCommit(
-        octokit,
-        owner,
-        repoName,
-        defaultBase.commitSha,
-        existingBase.commitSha,
-        authenticatedLogin
-      ));
+      (await findNonActionBranchCommit(octokit, owner, repoName, existingBase.commitSha, authenticatedLogin));
     if (nonActionCommit) {
       const message = `PR #${existingPr.number} has a commit not made by ${authenticatedLogin}; skipping branch rebuild.`;
       core.warning(`  ⚠️  ${message}`);
@@ -2697,14 +2692,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       const existingBase = defaultBase ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
       const nonActionCommit =
         existingBase &&
-        (await findNonActionBranchCommit(
-          octokit,
-          owner,
-          repoName,
-          defaultBase.commitSha,
-          existingBase.commitSha,
-          authenticatedLogin
-        ));
+        (await findNonActionBranchCommit(octokit, owner, repoName, existingBase.commitSha, authenticatedLogin));
       if (nonActionCommit) {
         const message = `PR #${existingPR.number} has a commit not made by ${authenticatedLogin}; skipping branch rebuild.`;
         core.warning(`  ⚠️  ${message}`);
