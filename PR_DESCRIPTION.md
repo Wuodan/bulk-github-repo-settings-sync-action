@@ -22,6 +22,15 @@ sync branch:      B -- S'
 
 So the refreshed branch contains the new target commit and the new sync commit; the PR diff against the current target remains limited to `S'`.
 
+The same issue was worse after a target-history rewrite. If a new commit was inserted before `B` and `C`, their rewritten versions received new SHAs:
+
+```
+current main: A -- X -- B' -- C'
+old sync:     A ------ B -- C -- S'
+```
+
+The old sync branch was now divergent, so GitHub showed `B`, `C`, and `S'` as PR commits and included the replaced target changes in the PR diff. The new behavior rebuilds the sync branch from `C'`, leaving only the new sync commit in the PR.
+
 ## Changes
 
 ### Fix stale sync PR branches
