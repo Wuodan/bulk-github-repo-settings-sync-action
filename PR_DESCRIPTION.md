@@ -28,7 +28,6 @@ So the refreshed branch contains the new target commit and the new sync commit; 
 
 - Refresh action-owned sync PRs from the current default branch when that tip is not an ancestor of the PR branch.
 - Rebuild the managed-file diff on the current default tree, so unrelated changes from the old target history do not remain in the PR.
-- Treat a default tip that is any ancestor of the PR branch as current. This avoids unnecessary refreshes for multi-commit sync PRs.
 
 ### Protect externally modified PR branches
 
