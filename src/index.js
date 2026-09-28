@@ -12,6 +12,7 @@
 
 import * as core from '@actions/core';
 import { Octokit } from '@octokit/rest';
+import { partialDeepStrictEqual } from 'node:assert/strict';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import ignore from 'ignore';
@@ -3603,6 +3604,36 @@ export function stripRulesetReadonlyFields(config) {
   return result;
 }
 
+/** Return whether actual contains the configured values, with configured arrays compared exactly. */
+function rulesetConfigMatches(actual, expected) {
+  const hasMatchingArrayLengths = (value, config) => {
+    if (Array.isArray(config)) {
+      return (
+        Array.isArray(value) &&
+        value.length === config.length &&
+        config.every((item, index) => hasMatchingArrayLengths(value[index], item))
+      );
+    }
+    if (config && typeof config === 'object') {
+      return (
+        value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        Object.keys(config).every(key => hasMatchingArrayLengths(value[key], config[key]))
+      );
+    }
+    return true;
+  };
+
+  if (!hasMatchingArrayLengths(actual, expected)) return false;
+  try {
+    partialDeepStrictEqual(actual, expected);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Sync repository rulesets to target repository.
  * Accepts an array of ruleset JSON file paths, processes each one,
@@ -3738,7 +3769,7 @@ export async function syncRepositoryRulesets(octokit, repo, rulesetFilePaths, de
 
       const existingConfig = stripRulesetReadonlyFields(fullRuleset);
       const normalizedSourceConfig = stripRulesetReadonlyFields(rulesetConfig);
-      const configsMatch = deepEqual(existingConfig, normalizedSourceConfig);
+      const configsMatch = rulesetConfigMatches(existingConfig, normalizedSourceConfig);
 
       if (configsMatch) {
         core.info(`  📋 Ruleset "${rulesetName}" is already up to date`);
