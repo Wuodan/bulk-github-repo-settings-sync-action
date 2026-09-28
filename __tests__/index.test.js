@@ -1525,14 +1525,72 @@ describe('Bulk GitHub Repository Settings Action', () => {
       const result = await syncFileSyncGroup(mockOctokit, 'owner/repo', mappings, false, 'bot');
 
       expect(result).toMatchObject({ success: true, fileSync: 'pr-updated', prNumber: 19 });
+      expect(mockOctokit.rest.git.createBlob).not.toHaveBeenCalled();
       expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
-        expect.objectContaining({ base_tree: 'default-tree' })
+        expect.objectContaining({
+          base_tree: 'default-tree',
+          tree: [{ path: 'renovate.json', mode: '100644', type: 'blob', sha: desiredSha }]
+        })
       );
       expect(mockOctokit.rest.git.createCommit).toHaveBeenCalledWith(
         expect.objectContaining({ parents: ['default-commit'] })
       );
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
         expect.objectContaining({ ref: 'heads/file-sync', sha: 'new-commit', force: true })
+      );
+    });
+
+    test('uploads changed files when rebuilding an existing sync PR on a diverged default branch', async () => {
+      const mappings = parseFileSyncConfig([
+        { name: 'Renovate configuration', source: './renovate.json', target: 'renovate.json' }
+      ]);
+      const desiredContent = Buffer.from('{"extends": []}\n');
+      const file = { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false, mode: 0o100644 };
+      mockFs.lstatSync.mockReturnValue(file);
+      mockFs.readFileSync.mockReturnValue(desiredContent);
+      mockOctokit.rest.repos.get.mockResolvedValue({ data: { default_branch: 'main' } });
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 19, html_url: 'https://example.test/pr/19', user: { login: 'bot' }, base: { ref: 'main' } }]
+      });
+      mockOctokit.rest.git.getRef.mockImplementation(({ ref }) =>
+        Promise.resolve({ data: { object: { sha: ref === 'heads/main' ? 'default-commit' : 'pr-commit' } } })
+      );
+      mockOctokit.rest.git.getCommit.mockImplementation(({ commit_sha }) =>
+        Promise.resolve({
+          data: {
+            tree: { sha: commit_sha === 'default-commit' ? 'default-tree' : 'pr-tree' },
+            parents: commit_sha === 'default-commit' ? [] : [{ sha: 'obsolete-commit' }]
+          }
+        })
+      );
+      mockOctokit.rest.git.getTree.mockImplementation(({ tree_sha }) =>
+        Promise.resolve({
+          data: {
+            tree:
+              tree_sha === 'default-tree'
+                ? []
+                : [{ path: 'renovate.json', type: 'blob', mode: '100644', sha: 'stale-blob' }]
+          }
+        })
+      );
+      mockOctokit.rest.git.createBlob.mockResolvedValue({ data: { sha: 'new-blob' } });
+      mockOctokit.rest.git.createTree.mockResolvedValue({ data: { sha: 'new-tree' } });
+      mockOctokit.rest.git.createCommit.mockResolvedValue({ data: { sha: 'new-commit' } });
+
+      const result = await syncFileSyncGroup(mockOctokit, 'owner/repo', mappings, false, 'bot');
+
+      expect(result).toMatchObject({ success: true, fileSync: 'pr-updated', prNumber: 19 });
+      expect(mockOctokit.rest.git.createBlob).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        content: desiredContent.toString('base64'),
+        encoding: 'base64'
+      });
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          base_tree: 'default-tree',
+          tree: [{ path: 'renovate.json', mode: '100644', type: 'blob', sha: 'new-blob' }]
+        })
       );
     });
 
