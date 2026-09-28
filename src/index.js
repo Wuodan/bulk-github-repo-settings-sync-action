@@ -2311,6 +2311,11 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       if (change.deleted) {
         tree.push({ path: change.path, mode: change.mode, type: 'blob', sha: null });
       } else {
+        const existingEntry = existingPr ? remoteFiles.get(change.path) : null;
+        if (existingEntry && equalGitFile(existingEntry, change)) {
+          tree.push({ path: change.path, mode: change.mode, type: 'blob', sha: existingEntry.sha });
+          continue;
+        }
         const { data: blob } = await octokit.rest.git.createBlob({
           owner,
           repo: repoName,
