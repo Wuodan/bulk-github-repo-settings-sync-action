@@ -2111,35 +2111,6 @@ async function getGitRefIfExists(octokit, owner, repo, ref) {
   }
 }
 
-async function createFileSyncCommit(octokit, owner, repo, base, files, message) {
-  const tree = [];
-  for (const file of files) {
-    const content = Buffer.from(file.finalContent || file.content);
-    const { data: blob } = await octokit.rest.git.createBlob({
-      owner,
-      repo,
-      content: content.toString('base64'),
-      encoding: 'base64'
-    });
-    tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha: blob.sha });
-  }
-  const { data: newTree } = await octokit.rest.git.createTree({
-    owner,
-    repo,
-    base_tree: base.treeSha,
-    tree
-  });
-  return (
-    await octokit.rest.git.createCommit({
-      owner,
-      repo,
-      message,
-      tree: newTree.sha,
-      parents: [base.commitSha]
-    })
-  ).data;
-}
-
 /** Force-update an action-owned branch only if it still has the expected tip. */
 export async function updateActionBranchRef(octokit, repo, branchName, expectedSha, sha, branchLabel = 'branch') {
   const [owner, repoName] = repo.split('/');
@@ -2319,6 +2290,11 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       if (change.deleted) {
         tree.push({ path: change.path, mode: change.mode, type: 'blob', sha: null });
       } else {
+        const existingEntry = existingPr ? remoteFiles.get(change.path) : null;
+        if (existingEntry && equalGitFile(existingEntry, change)) {
+          tree.push({ path: change.path, mode: change.mode, type: 'blob', sha: existingEntry.sha });
+          continue;
+        }
         const { data: blob } = await octokit.rest.git.createBlob({
           owner,
           repo: repoName,
@@ -2402,10 +2378,47 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
 }
 
 /**
+ * Create one commit containing the supplied file changes on a target branch commit.
+ * Reusing an identical blob from an existing PR branch avoids uploading it again.
+ */
+async function createSyncCommit(octokit, owner, repo, base, files, message, reusableBlobShas = new Map()) {
+  const tree = [];
+  for (const file of files) {
+    const content = Buffer.from(file.finalContent || file.content);
+    const reusableSha = reusableBlobShas.get(file.targetPath);
+    const sha =
+      reusableSha === gitBlobSha(content)
+        ? reusableSha
+        : (
+            await octokit.rest.git.createBlob({
+              owner,
+              repo,
+              content: content.toString('base64'),
+              encoding: 'base64'
+            })
+          ).data.sha;
+    tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha });
+  }
+  const { data: newTree } = await octokit.rest.git.createTree({
+    owner,
+    repo,
+    base_tree: base.treeSha,
+    tree
+  });
+  return (
+    await octokit.rest.git.createCommit({
+      owner,
+      repo,
+      message,
+      tree: newTree.sha,
+      parents: [base.commitSha]
+    })
+  ).data;
+}
+
+/**
  * Generic function to sync one or more files to a target repository via pull request.
- * If an open PR already exists for the same branch, the function checks if the PR branch
- * content differs from the new source content. If different, it updates the PR branch with
- * a new commit. If the content is already up to date, returns 'pr-up-to-date' status.
+ * Each managed PR branch is rebuilt as one commit on the current target branch.
  * @param {Octokit} octokit - Octokit instance
  * @param {string} repo - Repository in "owner/repo" format
  * @param {Object} options - Sync options
@@ -2614,6 +2627,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
 
       // Fetch content from the PR branch to compare against source
       const prBranchFilesToUpdate = [];
+      const prBranchShas = new Map();
       for (const fileInfo of fileInfos) {
         let prBranchContent = null;
         let prBranchSha = null;
@@ -2627,6 +2641,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           });
           prBranchContent = Buffer.from(data.content, 'base64').toString('utf8');
           prBranchSha = data.sha;
+          prBranchShas.set(fileInfo.targetPath, prBranchSha);
         } catch (error) {
           if (error.status !== 404) {
             throw error;
@@ -2705,7 +2720,15 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
 
       const createdFiles = branchFilesToUpdate.filter(file => file.isNew).map(file => file.targetPath);
       const updatedFiles = branchFilesToUpdate.filter(file => !file.isNew).map(file => file.targetPath);
-      const commit = await createFileSyncCommit(octokit, owner, repoName, defaultBase, branchFilesToUpdate, prTitle);
+      const commit = await createSyncCommit(
+        octokit,
+        owner,
+        repoName,
+        defaultBase,
+        branchFilesToUpdate,
+        prTitle,
+        prBranchShas
+      );
       await updateActionBranchRef(octokit, repo, branchName, existingBase.commitSha, commit.sha, 'sync branch');
       for (const file of branchFilesToUpdate) {
         core.info(`  ✍️  Committed changes to ${file.targetPath} in PR #${existingPR.number}`);
@@ -2768,7 +2791,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
       };
     }
 
-    // Create or get reference to the branch
+    // Create or get reference to the branch.
     core.info(`  🔍 Checking for existing branch ${branchName}...`);
     let branchExists = false;
     try {
@@ -2788,19 +2811,12 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
     }
 
     const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
+
     const createdFiles = filesToUpdate.filter(file => file.isNew).map(file => file.targetPath);
     const updatedFiles = filesToUpdate.filter(file => !file.isNew).map(file => file.targetPath);
-    const commit = await createFileSyncCommit(octokit, owner, repoName, defaultBase, filesToUpdate, prTitle);
+    const commit = await createSyncCommit(octokit, owner, repoName, defaultBase, filesToUpdate, prTitle);
 
-    if (!branchExists) {
-      await octokit.rest.git.createRef({
-        owner,
-        repo: repoName,
-        ref: `refs/heads/${branchName}`,
-        sha: commit.sha
-      });
-      core.info(`  🌿 Created branch ${branchName}`);
-    } else {
+    if (branchExists) {
       await octokit.rest.git.updateRef({
         owner,
         repo: repoName,
@@ -2809,8 +2825,10 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         force: true
       });
       core.info(`  🌿 Updated branch ${branchName}`);
+    } else {
+      await octokit.rest.git.createRef({ owner, repo: repoName, ref: `refs/heads/${branchName}`, sha: commit.sha });
+      core.info(`  🌿 Created branch ${branchName}`);
     }
-
     for (const file of filesToUpdate) {
       core.info(`  ✍️  Committed changes to ${file.targetPath}`);
     }
