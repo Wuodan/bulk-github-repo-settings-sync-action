@@ -2622,6 +2622,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
 
       // Fetch content from the PR branch to compare against source
       const prBranchFilesToUpdate = [];
+      const prBranchShas = new Map();
       for (const fileInfo of fileInfos) {
         let prBranchContent = null;
         let prBranchSha = null;
@@ -2635,6 +2636,7 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
           });
           prBranchContent = Buffer.from(data.content, 'base64').toString('utf8');
           prBranchSha = data.sha;
+          prBranchShas.set(fileInfo.targetPath, prBranchSha);
         } catch (error) {
           if (error.status !== 404) {
             throw error;
@@ -2725,13 +2727,18 @@ export async function syncFilesViaPullRequest(octokit, repo, options, dryRun) {
         const tree = [];
         for (const file of branchFilesToUpdate) {
           const contentToCommit = file.finalContent || file.content;
-          const { data: blob } = await octokit.rest.git.createBlob({
-            owner,
-            repo: repoName,
-            content: Buffer.from(contentToCommit).toString('base64'),
-            encoding: 'base64'
-          });
-          tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha: blob.sha });
+          const prBranchSha = prBranchShas.get(file.targetPath);
+          if (prBranchSha === gitBlobSha(Buffer.from(contentToCommit))) {
+            tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha: prBranchSha });
+          } else {
+            const { data: blob } = await octokit.rest.git.createBlob({
+              owner,
+              repo: repoName,
+              content: Buffer.from(contentToCommit).toString('base64'),
+              encoding: 'base64'
+            });
+            tree.push({ path: file.targetPath, mode: '100644', type: 'blob', sha: blob.sha });
+          }
           if (file.isNew) {
             createdFiles.push(file.targetPath);
           } else {
