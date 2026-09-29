@@ -2182,27 +2182,23 @@ function fileSyncDeletionCandidates(mappings, desired, remoteFiles) {
   return deleted;
 }
 
-/** Sync one file-sync group through the Git Data API, preserving Git modes and symlinks. */
-export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authenticatedLogin) {
+/** Sync prepared file entries through the Git Data API pull-request lifecycle. */
+async function syncPreparedFilesViaPullRequest(octokit, repo, options, dryRun, authenticatedLogin) {
+  const { group, branchName, prTitle, prepare, renderBody } = options;
   const [owner, repoName] = repo.split('/');
-  const group = mappings[0]?.group || DEFAULT_FILE_SYNC_GROUP;
-  const branchName = fileSyncBranchName(group);
-  const prTitle = fileSyncPrTitle(group, mappings);
   if (!owner || !repoName)
     return { repository: repo, success: false, error: 'Invalid repository format. Expected "owner/repo"', dryRun };
 
   try {
-    const desired = buildFileSyncDesiredEntries(mappings);
     const { data: repoData } = await octokit.rest.repos.get({ owner, repo: repoName });
     const defaultBranch = repoData.default_branch;
-    const changesFor = remoteFiles => {
+    const changesFor = ({ desired, deletions }, remoteFiles) => {
       const changes = [];
       for (const [targetPath, entry] of desired) {
-        if (!equalGitFile(remoteFiles.get(targetPath), entry)) {
+        if (entry.matches !== true && !equalGitFile(remoteFiles.get(targetPath), entry)) {
           changes.push({ path: targetPath, ...entry, isNew: !remoteFiles.has(targetPath) });
         }
       }
-      const deletions = fileSyncDeletionCandidates(mappings, desired, remoteFiles);
       for (const [targetPath, entry] of deletions)
         changes.push({ path: targetPath, mode: entry.mode, type: 'blob', sha: null, deleted: true });
       return changes;
@@ -2211,7 +2207,8 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     // Only close a sync PR after establishing that the default branch already has the desired state.
     const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
     const defaultFiles = await getGitTreeFiles(octokit, owner, repoName, defaultBase.treeSha);
-    const defaultChanges = changesFor(defaultFiles);
+    const defaultPrepared = await prepare(defaultFiles);
+    const defaultChanges = changesFor(defaultPrepared, defaultFiles);
 
     if (defaultChanges.length === 0) {
       const stale = await closeStaleActionPrs(octokit, repo, branchName, dryRun, authenticatedLogin);
@@ -2239,7 +2236,8 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
     const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
     const base = existingBase || defaultBase;
     const remoteFiles = existingPr ? await getGitTreeFiles(octokit, owner, repoName, base.treeSha) : defaultFiles;
-    const changes = existingPr ? changesFor(remoteFiles) : defaultChanges;
+    const prepared = existingPr ? await prepare(remoteFiles) : defaultPrepared;
+    const changes = existingPr ? changesFor(prepared, remoteFiles) : defaultChanges;
 
     if (changes.length === 0) {
       return {
@@ -2356,11 +2354,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
         throw new Error(`Failed to create file-sync branch '${branchName}': ${error.message}`);
       }
     }
-    const body = `Syncs the configured file-sync group **${group}**.\n\n**Mappings:**\n${mappings
-      .map(mapping => `- ${mapping.name}`)
-      .join('\n')}\n\n**Changes:**\n${changes
-      .map(change => `- ${change.deleted ? 'Delete' : change.isNew ? 'Add' : 'Update'} \`${change.path}\``)
-      .join('\n')}`;
+    const body = renderBody(changes);
     const { data: pr } = await octokit.rest.pulls.create({
       owner,
       repo: repoName,
@@ -2386,6 +2380,32 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       dryRun
     };
   }
+}
+
+/** Sync one file-sync group, preserving Git modes, symlinks, and deletions. */
+export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authenticatedLogin) {
+  const group = mappings[0]?.group || DEFAULT_FILE_SYNC_GROUP;
+  return syncPreparedFilesViaPullRequest(
+    octokit,
+    repo,
+    {
+      group,
+      branchName: fileSyncBranchName(group),
+      prTitle: fileSyncPrTitle(group, mappings),
+      prepare: async remoteFiles => {
+        const desired = buildFileSyncDesiredEntries(mappings);
+        return { desired, deletions: fileSyncDeletionCandidates(mappings, desired, remoteFiles) };
+      },
+      renderBody: changes =>
+        `Syncs the configured file-sync group **${group}**.\n\n**Mappings:**\n${mappings
+          .map(mapping => `- ${mapping.name}`)
+          .join('\n')}\n\n**Changes:**\n${changes
+          .map(change => `- ${change.deleted ? 'Delete' : change.isNew ? 'Add' : 'Update'} \`${change.path}\``)
+          .join('\n')}`
+    },
+    dryRun,
+    authenticatedLogin
+  );
 }
 
 /**
