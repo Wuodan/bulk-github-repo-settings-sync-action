@@ -2154,6 +2154,13 @@ async function getGitTreeFiles(octokit, owner, repo, treeSha) {
   return new Map(data.tree.filter(entry => entry.type === 'blob').map(entry => [entry.path, entry]));
 }
 
+async function getGitTreeFileContent(octokit, owner, repo, remoteFiles, targetPath) {
+  const entry = remoteFiles.get(targetPath);
+  if (!entry) return null;
+  const { data } = await octokit.rest.git.getBlob({ owner, repo, file_sha: entry.sha });
+  return Buffer.from(data.content, 'base64').toString('utf8');
+}
+
 function gitBlobSha(content) {
   return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
 }
@@ -2207,7 +2214,12 @@ async function syncPreparedFilesViaPullRequest(octokit, repo, options, dryRun, a
     // Only close a sync PR after establishing that the default branch already has the desired state.
     const defaultBase = await getGitCommitAndTree(octokit, owner, repoName, defaultBranch);
     const defaultFiles = await getGitTreeFiles(octokit, owner, repoName, defaultBase.treeSha);
-    const defaultPrepared = await prepare(defaultFiles);
+    const prepareFor = remoteFiles =>
+      prepare({
+        remoteFiles,
+        readContent: targetPath => getGitTreeFileContent(octokit, owner, repoName, remoteFiles, targetPath)
+      });
+    const defaultPrepared = await prepareFor(defaultFiles);
     const defaultChanges = changesFor(defaultPrepared, defaultFiles);
 
     if (defaultChanges.length === 0) {
@@ -2236,7 +2248,7 @@ async function syncPreparedFilesViaPullRequest(octokit, repo, options, dryRun, a
     const existingBase = existingPr ? await getGitCommitAndTree(octokit, owner, repoName, branchName) : null;
     const base = existingBase || defaultBase;
     const remoteFiles = existingPr ? await getGitTreeFiles(octokit, owner, repoName, base.treeSha) : defaultFiles;
-    const prepared = existingPr ? await prepare(remoteFiles) : defaultPrepared;
+    const prepared = existingPr ? await prepareFor(remoteFiles) : defaultPrepared;
     const changes = existingPr ? changesFor(prepared, remoteFiles) : defaultChanges;
 
     if (changes.length === 0) {
@@ -2393,7 +2405,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       group,
       branchName: fileSyncBranchName(group),
       prTitle: fileSyncPrTitle(group, mappings),
-      prepare: async remoteFiles => {
+      prepare: async ({ remoteFiles }) => {
         desired ||= buildFileSyncDesiredEntries(mappings);
         return { desired, deletions: fileSyncDeletionCandidates(mappings, desired, remoteFiles) };
       },
