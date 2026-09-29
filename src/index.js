@@ -2385,6 +2385,7 @@ async function syncPreparedFilesViaPullRequest(octokit, repo, options, dryRun, a
 /** Sync one file-sync group, preserving Git modes, symlinks, and deletions. */
 export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authenticatedLogin) {
   const group = mappings[0]?.group || DEFAULT_FILE_SYNC_GROUP;
+  let desired;
   return syncPreparedFilesViaPullRequest(
     octokit,
     repo,
@@ -2393,7 +2394,7 @@ export async function syncFileSyncGroup(octokit, repo, mappings, dryRun, authent
       branchName: fileSyncBranchName(group),
       prTitle: fileSyncPrTitle(group, mappings),
       prepare: async remoteFiles => {
-        const desired = buildFileSyncDesiredEntries(mappings);
+        desired ||= buildFileSyncDesiredEntries(mappings);
         return { desired, deletions: fileSyncDeletionCandidates(mappings, desired, remoteFiles) };
       },
       renderBody: changes =>

@@ -1431,6 +1431,7 @@ describe('Bulk GitHub Repository Settings Action', () => {
       const result = await syncFileSyncGroup(mockOctokit, 'owner/repo', mappings, false, 'bot');
 
       expect(result).toMatchObject({ success: true, fileSync: 'pr-up-to-date', prNumber: 19 });
+      expect(mockFs.readFileSync).toHaveBeenCalledTimes(1);
       expect(mockOctokit.rest.git.getBlob).not.toHaveBeenCalled();
       expect(mockOctokit.rest.pulls.update).not.toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
